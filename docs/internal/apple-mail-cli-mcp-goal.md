@@ -68,7 +68,7 @@ The goal is complete only when:
 
 ## Milestones
 
-- [ ] Milestone 1: Read-only Mail service and CLI
+- [x] Milestone 1: Read-only Mail service and CLI
 - [ ] Milestone 2: Guarded mutations and message composition
 - [ ] Milestone 3: Stdio MCP parity and operator documentation
 
@@ -99,7 +99,11 @@ cargo test --lib
 cargo test --test cli_read
 ```
 
-Status: Not started.
+Status: Complete.
+
+- 2026-07-22: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib` (4 passed), `cargo test --test cli_read` (2 passed), and `git diff --check` passed. The live `accounts` smoke reached the macOS Automation boundary but waited for more than 20 seconds, as did a direct read-only `osascript` account count; no account values were printed. This is recorded as local permission/session state, not substituted for default automated coverage.
+- 2026-07-22 review repair: embedded the fixed script into the binary, changed subprocess capture to enforce byte ceilings while reading and terminate on overflow/timeout, avoided materializing the full message collection, made body truncation Unicode-scalar-safe, classified public automation errors without raw details, completed every read-path fake and CLI test, and added the gated `scripts/live-smoke.sh` procedure. Narrow verification now passes with 13 library tests and 4 CLI integration tests; the unset smoke gate exits 2 before Mail access.
+- 2026-07-22 checkpoint: the retained reviewer reported no blocking findings after one repair round. Final `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib` (13 passed), `cargo test --test cli_read` (4 passed), and `git diff --check` passed.
 
 ## Milestone 2: Guarded mutations and message composition
 
@@ -172,6 +176,7 @@ Then verify the durable checkout and remote default branch after fast-forward de
 - 2026-07-22: Chose a private repository because public publication was not explicitly authorized.
 - 2026-07-22: Chose one binary and a fixed JXA-over-`osascript` adapter for the first complete release; a service boundary permits a future backend without adding it now.
 - 2026-07-22: Chose JSON as the CLI's initial stable output instead of parallel renderers.
+- 2026-07-22: Added explicit stdout piping after a live smoke exposed that `tokio::process::Command::spawn` otherwise inherited child output; a regression test now proves fixed automation output is captured.
 
 ## Resume Protocol
 
