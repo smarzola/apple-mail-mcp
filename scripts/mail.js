@@ -116,13 +116,25 @@ function mailboxRecords(account, accountId) {
     return output;
 }
 
+function scopedMessageReference(message, fallback) {
+    let accountId = fallback.account_id || null;
+    let path = fallback.path;
+    if (!accountId) {
+        try {
+            const mailbox = message.mailbox();
+            accountId = text(mailbox.account().id(), "") || null;
+        } catch (_) {}
+    }
+    return {
+        account_id: accountId,
+        mailbox_path: path,
+        id: integer(message.id(), 0),
+    };
+}
+
 function messageRecord(message, reference, includeContent, maxBodyChars) {
     const record = {
-        reference: {
-            account_id: reference.account_id || null,
-            mailbox_path: reference.path,
-            id: integer(message.id(), 0),
-        },
+        reference: scopedMessageReference(message, reference),
         message_id: text(message.messageId(), "") || null,
         subject: text(message.subject(), ""),
         sender: text(message.sender(), ""),
@@ -147,9 +159,45 @@ function findMessage(mailbox, id) {
     return candidate;
 }
 
+function composeMessage(Mail, message, visible) {
+    const outgoing = Mail.OutgoingMessage({
+        subject: message.subject,
+        content: message.body,
+        visible: visible,
+    });
+    Mail.outgoingMessages.push(outgoing);
+    for (const address of message.to) {
+        outgoing.toRecipients.push(Mail.ToRecipient({address: address}));
+    }
+    for (const address of message.cc) {
+        outgoing.ccRecipients.push(Mail.CcRecipient({address: address}));
+    }
+    for (const address of message.bcc) {
+        outgoing.bccRecipients.push(Mail.BccRecipient({address: address}));
+    }
+    return outgoing;
+}
+
 function dispatch(operation, args) {
     if (operation === "__health") return {status: "ready"};
     if (operation === "__test_truncate") return truncateText(args.text, args.limit);
+    if (operation === "__echo") return args;
+    if (operation === "__test_scope_reference") {
+        const fakeMessage = {
+            id: function() { return args.id; },
+            mailbox: function() {
+                return {
+                    account: function() {
+                        return {id: function() { return args.account_id; }};
+                    },
+                };
+            },
+        };
+        return scopedMessageReference(fakeMessage, {
+            account_id: null,
+            path: args.path,
+        });
+    }
 
     const Mail = Application("Mail");
 
@@ -210,6 +258,52 @@ function dispatch(operation, args) {
             Mail.checkForNewMail();
         }
         return {requested: true};
+    }
+
+    if (operation === "set_message_state") {
+        const mailbox = resolveMailbox(Mail, {
+            account_id: args.message.account_id,
+            path: args.message.mailbox_path,
+        });
+        const message = findMessage(mailbox, args.message.id);
+        if (args.read !== null && args.read !== undefined) message.readStatus = args.read;
+        if (args.flagged !== null && args.flagged !== undefined) message.flaggedStatus = args.flagged;
+        return {
+            message: args.message,
+            read: boolean(message.readStatus(), false),
+            flagged: boolean(message.flaggedStatus(), false),
+        };
+    }
+
+    if (operation === "move_message") {
+        const source = resolveMailbox(Mail, {
+            account_id: args.message.account_id,
+            path: args.message.mailbox_path,
+        });
+        const message = findMessage(source, args.message.id);
+        const destination = resolveMailbox(Mail, args.destination);
+        Mail.move(message, {to: destination});
+        return {
+            moved: true,
+            destination: args.destination,
+        };
+    }
+
+    if (operation === "create_draft") {
+        const draft = composeMessage(Mail, args.message, true);
+        Mail.save(draft);
+        return {
+            local_id: integer(draft.id(), 0),
+            sent: false,
+            visible: boolean(draft.visible(), false),
+        };
+    }
+
+    if (operation === "send_message") {
+        const outgoing = composeMessage(Mail, args.message, false);
+        const localId = integer(outgoing.id(), 0);
+        const sent = boolean(Mail.send(outgoing), false);
+        return {local_id: localId, sent: sent, visible: false};
     }
 
     throw new Error("Unsupported automation operation");

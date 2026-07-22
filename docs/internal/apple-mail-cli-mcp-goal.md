@@ -69,7 +69,7 @@ The goal is complete only when:
 ## Milestones
 
 - [x] Milestone 1: Read-only Mail service and CLI
-- [ ] Milestone 2: Guarded mutations and message composition
+- [x] Milestone 2: Guarded mutations and message composition
 - [ ] Milestone 3: Stdio MCP parity and operator documentation
 
 ### Checkpoint Protocol
@@ -128,7 +128,12 @@ cargo test mutation
 cargo test --test cli_write
 ```
 
-Status: Not started.
+Status: Complete.
+
+- 2026-07-22: Starting commit `dd584b7`. Added typed state, move, draft, and send operations across models, service, fixed automation dispatch, and CLI. Service policy denies sending by default; CLI construction enables it but every send still requires `--confirm-send`. Validation covers mailbox scope, differing move destinations, address shape, recipient count, subject/body bounds, control characters, and NUL. Verification uses only fake-backed mutation tests and embedded non-Mail automation self-tests; no real mailbox was mutated and no message was sent.
+- 2026-07-22 review repair: mutations now require account-scoped source references; move destinations inherit and normalize that account before same-mailbox checks, and mailbox paths have depth/total-size caps. Move results are truthful acknowledgements without synthetic post-move IDs. State results are compared with requested values, draft visibility is read back from Mail, and every state/draft/move confirmation invariant has backend-level regression coverage. Serialized automation input now has a hard byte ceiling.
+- 2026-07-22 re-review repair: deriving an account for an unscoped search result now preserves the complete nested fallback mailbox path. An embedded JXA regression proves `Projects/Customer` round-trips with the derived account. Serialized input tests now cover the exact byte ceiling and the first rejected byte.
+- 2026-07-22 checkpoint: the retained reviewer reported no blocking findings after two repair rounds. Final `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test mutation` (2 passed), `cargo test --test cli_write` (4 passed), `cargo test --lib` (24 passed), and `git diff --check` passed.
 
 ## Milestone 3: Stdio MCP parity and operator documentation
 

@@ -4,8 +4,10 @@ use apple_mail_mcp::{
     MailBackend, MailService,
     cli::{Cli, run},
     model::{
-        Account, CheckMailRequest, CheckMailResult, GetMessageRequest, ListMailboxesRequest,
-        Mailbox, MailboxRef, MessageDetail, MessageSummary, SearchRequest,
+        Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
+        GetMessageRequest, ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail,
+        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest,
+        SendMessageRequest, SetMessageStateRequest,
     },
 };
 use async_trait::async_trait;
@@ -76,6 +78,34 @@ impl MailBackend for FakeBackend {
 
     async fn check_mail(&self, _: CheckMailRequest) -> apple_mail_mcp::Result<CheckMailResult> {
         Ok(CheckMailResult { requested: true })
+    }
+
+    async fn set_message_state(
+        &self,
+        _: SetMessageStateRequest,
+    ) -> apple_mail_mcp::Result<MessageStateResult> {
+        unreachable!("read-only test invoked state mutation")
+    }
+
+    async fn move_message(
+        &self,
+        _: MoveMessageRequest,
+    ) -> apple_mail_mcp::Result<MoveMessageResult> {
+        unreachable!("read-only test invoked move")
+    }
+
+    async fn create_draft(
+        &self,
+        _: CreateDraftRequest,
+    ) -> apple_mail_mcp::Result<CompositionResult> {
+        unreachable!("read-only test invoked draft creation")
+    }
+
+    async fn send_message(
+        &self,
+        _: SendMessageRequest,
+    ) -> apple_mail_mcp::Result<CompositionResult> {
+        unreachable!("read-only test invoked sending")
     }
 }
 

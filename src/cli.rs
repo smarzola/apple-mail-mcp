@@ -6,8 +6,9 @@ use crate::{
     MailBackend, MailService,
     error::Result,
     model::{
-        CheckMailRequest, DEFAULT_BODY_CHARS, DEFAULT_RESULT_LIMIT, GetMessageRequest,
-        ListMailboxesRequest, MailboxRef, MessageRef, SearchRequest,
+        CheckMailRequest, CreateDraftRequest, DEFAULT_BODY_CHARS, DEFAULT_RESULT_LIMIT,
+        GetMessageRequest, ListMailboxesRequest, MailboxRef, MessageRef, MoveMessageRequest,
+        OutgoingMessage, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -42,6 +43,14 @@ pub enum Command {
         #[arg(long)]
         account: Option<String>,
     },
+    /// Change read or flagged state for one mailbox-scoped message.
+    State(StateArgs),
+    /// Move one mailbox-scoped message to another mailbox.
+    Move(MoveArgs),
+    /// Create and display a draft in Mail without sending it.
+    Draft(ComposeArgs),
+    /// Send a new message after explicit confirmation.
+    Send(SendArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -88,19 +97,16 @@ pub struct SearchArgs {
     pub limit: u16,
 }
 
-#[derive(Debug, Args)]
-pub struct MessageArgs {
+#[derive(Clone, Debug, Args)]
+pub struct MessageRefArgs {
     #[command(flatten)]
     pub mailbox: MailboxArgs,
     /// Mail's positive local message ID returned by `search`.
     #[arg(long)]
     pub id: i64,
-    /// Maximum body characters returned (1-65536).
-    #[arg(long, default_value_t = DEFAULT_BODY_CHARS)]
-    pub max_body_chars: u32,
 }
 
-impl MessageArgs {
+impl MessageRefArgs {
     pub fn reference(&self) -> MessageRef {
         let mailbox = self.mailbox.reference();
         MessageRef {
@@ -109,6 +115,97 @@ impl MessageArgs {
             id: self.id,
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct MessageArgs {
+    #[command(flatten)]
+    pub message: MessageRefArgs,
+    /// Maximum body characters returned (1-65536).
+    #[arg(long, default_value_t = DEFAULT_BODY_CHARS)]
+    pub max_body_chars: u32,
+}
+
+impl MessageArgs {
+    pub fn reference(&self) -> MessageRef {
+        self.message.reference()
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct StateArgs {
+    #[command(flatten)]
+    pub message: MessageRefArgs,
+    /// Set read state to true or false.
+    #[arg(long)]
+    pub read: Option<bool>,
+    /// Set flagged state to true or false.
+    #[arg(long)]
+    pub flagged: Option<bool>,
+}
+
+#[derive(Debug, Args)]
+pub struct MoveArgs {
+    #[command(flatten)]
+    pub message: MessageRefArgs,
+    /// Destination Mail account ID. Defaults to the source account.
+    #[arg(long)]
+    pub destination_account: Option<String>,
+    /// One destination path component. Repeat for nested mailboxes.
+    #[arg(long = "destination-mailbox", required = true)]
+    pub destination_path: Vec<String>,
+}
+
+impl MoveArgs {
+    fn destination(&self) -> MailboxRef {
+        MailboxRef {
+            account_id: self
+                .destination_account
+                .clone()
+                .or_else(|| self.message.mailbox.account.clone()),
+            path: self.destination_path.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ComposeArgs {
+    /// To recipient. Repeat for multiple recipients.
+    #[arg(long = "to")]
+    pub to: Vec<String>,
+    /// Cc recipient. Repeat for multiple recipients.
+    #[arg(long = "cc")]
+    pub cc: Vec<String>,
+    /// Bcc recipient. Repeat for multiple recipients.
+    #[arg(long = "bcc")]
+    pub bcc: Vec<String>,
+    /// Message subject.
+    #[arg(long, default_value = "")]
+    pub subject: String,
+    /// Plain-text message body.
+    #[arg(long, default_value = "")]
+    pub body: String,
+}
+
+impl ComposeArgs {
+    pub fn message(&self) -> OutgoingMessage {
+        OutgoingMessage {
+            to: self.to.clone(),
+            cc: self.cc.clone(),
+            bcc: self.bcc.clone(),
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct SendArgs {
+    #[command(flatten)]
+    pub compose: ComposeArgs,
+    /// Confirm that this invocation should send externally.
+    #[arg(long)]
+    pub confirm_send: bool,
 }
 
 pub async fn run<B, W>(cli: Cli, service: &MailService<B>, output: &mut W) -> Result<()>
@@ -152,6 +249,41 @@ where
             service
                 .check_mail(CheckMailRequest {
                     account_id: account,
+                })
+                .await?,
+        )?,
+        Command::State(args) => serde_json::to_value(
+            service
+                .set_message_state(SetMessageStateRequest {
+                    message: args.message.reference(),
+                    read: args.read,
+                    flagged: args.flagged,
+                })
+                .await?,
+        )?,
+        Command::Move(args) => {
+            let destination = args.destination();
+            serde_json::to_value(
+                service
+                    .move_message(MoveMessageRequest {
+                        message: args.message.reference(),
+                        destination,
+                    })
+                    .await?,
+            )?
+        }
+        Command::Draft(args) => serde_json::to_value(
+            service
+                .create_draft(CreateDraftRequest {
+                    message: args.message(),
+                })
+                .await?,
+        )?,
+        Command::Send(args) => serde_json::to_value(
+            service
+                .send_message(SendMessageRequest {
+                    message: args.compose.message(),
+                    confirm: args.confirm_send,
                 })
                 .await?,
         )?,

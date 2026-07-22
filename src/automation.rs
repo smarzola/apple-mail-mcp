@@ -12,14 +12,17 @@ use tokio::{
 use crate::{
     error::{MailError, Result},
     model::{
-        Account, CheckMailRequest, CheckMailResult, GetMessageRequest, ListMailboxesRequest,
-        Mailbox, MessageDetail, MessageRef, MessageSummary, SearchRequest,
+        Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
+        GetMessageRequest, ListMailboxesRequest, Mailbox, MessageDetail, MessageRef,
+        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest,
+        SendMessageRequest, SetMessageStateRequest,
     },
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_AUTOMATION_OUTPUT: usize = 1_048_576;
 const MAX_AUTOMATION_ERROR: usize = 16_384;
+const MAX_AUTOMATION_INPUT: usize = 524_288;
 
 #[async_trait]
 pub trait MailBackend: Send + Sync {
@@ -28,6 +31,13 @@ pub trait MailBackend: Send + Sync {
     async fn search_messages(&self, request: SearchRequest) -> Result<Vec<MessageSummary>>;
     async fn get_message(&self, request: GetMessageRequest) -> Result<MessageDetail>;
     async fn check_mail(&self, request: CheckMailRequest) -> Result<CheckMailResult>;
+    async fn set_message_state(
+        &self,
+        request: SetMessageStateRequest,
+    ) -> Result<MessageStateResult>;
+    async fn move_message(&self, request: MoveMessageRequest) -> Result<MoveMessageResult>;
+    async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult>;
+    async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult>;
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +87,7 @@ impl JxaBackend {
             ));
         }
 
-        let payload = serde_json::to_string(payload)?;
+        let payload = encode_payload(payload)?;
         let _guard = self.gate.lock().await;
         let mut child = Command::new("/usr/bin/osascript")
             .arg("-l")
@@ -126,6 +136,19 @@ impl JxaBackend {
             )))
         }
     }
+}
+
+fn encode_payload<P>(payload: &P) -> Result<String>
+where
+    P: Serialize + ?Sized,
+{
+    let payload = serde_json::to_string(payload)?;
+    if payload.len() > MAX_AUTOMATION_INPUT {
+        return Err(MailError::Validation(
+            "serialized automation request exceeds the safety limit".to_owned(),
+        ));
+    }
+    Ok(payload)
 }
 
 async fn capture_output(child: &mut Child) -> Result<CapturedOutput> {
@@ -226,6 +249,53 @@ impl MailBackend for JxaBackend {
     async fn check_mail(&self, request: CheckMailRequest) -> Result<CheckMailResult> {
         self.call("check_mail", &request).await
     }
+
+    async fn set_message_state(
+        &self,
+        request: SetMessageStateRequest,
+    ) -> Result<MessageStateResult> {
+        let result: MessageStateResult = self.call("set_message_state", &request).await?;
+        if request.read.is_some_and(|expected| result.read != expected)
+            || request
+                .flagged
+                .is_some_and(|expected| result.flagged != expected)
+        {
+            return Err(MailError::AutomationFailed(
+                "Mail did not apply the requested message state".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
+
+    async fn move_message(&self, request: MoveMessageRequest) -> Result<MoveMessageResult> {
+        let result: MoveMessageResult = self.call("move_message", &request).await?;
+        if !result.moved || result.destination != request.destination {
+            return Err(MailError::AutomationFailed(
+                "Mail did not confirm the requested move".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
+
+    async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult> {
+        let result: CompositionResult = self.call("create_draft", &request).await?;
+        if result.local_id <= 0 || result.sent || !result.visible {
+            return Err(MailError::AutomationFailed(
+                "Mail did not confirm draft creation".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
+
+    async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult> {
+        let result: CompositionResult = self.call("send_message", &request).await?;
+        if result.local_id <= 0 || !result.sent {
+            return Err(MailError::AutomationFailed(
+                "Mail did not confirm that the message was sent".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
 }
 
 pub fn message_ref(account_id: Option<String>, mailbox_path: Vec<String>, id: i64) -> MessageRef {
@@ -242,7 +312,17 @@ mod tests {
 
     use assert_matches::assert_matches;
 
-    use super::{JxaBackend, MailError, public_automation_message};
+    use crate::{
+        MailBackend,
+        model::{
+            CreateDraftRequest, MailboxRef, MessageRef, MoveMessageRequest, OutgoingMessage,
+            SendMessageRequest, SetMessageStateRequest,
+        },
+    };
+
+    use super::{
+        JxaBackend, MAX_AUTOMATION_INPUT, MailError, encode_payload, public_automation_message,
+    };
 
     fn backend(script: &str) -> JxaBackend {
         JxaBackend {
@@ -337,6 +417,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_input_is_rejected_before_process_launch() {
+        assert_matches!(
+            JxaBackend::default()
+                .call::<serde_json::Value, _>("__echo", &"x".repeat(600_000))
+                .await,
+            Err(MailError::Validation(_))
+        );
+    }
+
+    #[test]
+    fn serialized_input_limit_accepts_boundary_and_rejects_next_byte() {
+        let at_limit = "x".repeat(MAX_AUTOMATION_INPUT - 2);
+        assert_eq!(
+            encode_payload(&at_limit).unwrap().len(),
+            MAX_AUTOMATION_INPUT
+        );
+        let over_limit = "x".repeat(MAX_AUTOMATION_INPUT - 1);
+        assert_matches!(encode_payload(&over_limit), Err(MailError::Validation(_)));
+    }
+
+    #[tokio::test]
     async fn embedded_truncation_preserves_astral_characters() {
         let value: serde_json::Value = JxaBackend::default()
             .call(
@@ -347,5 +448,155 @@ mod tests {
             .unwrap();
         assert_eq!(value["value"], "😀");
         assert_eq!(value["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn caller_values_are_serialized_as_data_not_script_source() {
+        let request = SendMessageRequest {
+            message: OutgoingMessage {
+                to: vec!["person@example.com".to_owned()],
+                cc: Vec::new(),
+                bcc: Vec::new(),
+                subject: "\"; Application('Finder'); // 😀".to_owned(),
+                body: "line one\nline two".to_owned(),
+            },
+            confirm: true,
+        };
+        let echoed: SendMessageRequest = JxaBackend::default()
+            .call("__echo", &request)
+            .await
+            .unwrap();
+        assert_eq!(echoed, request);
+    }
+
+    #[tokio::test]
+    async fn derived_account_preserves_nested_mailbox_path_for_round_trip() {
+        let reference: MessageRef = JxaBackend::default()
+            .call(
+                "__test_scope_reference",
+                &serde_json::json!({
+                    "account_id": "account-1",
+                    "path": ["Projects", "Customer"],
+                    "id": 42
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reference.account_id.as_deref(), Some("account-1"));
+        assert_eq!(reference.mailbox_path, ["Projects", "Customer"]);
+        assert_eq!(reference.id, 42);
+    }
+
+    #[tokio::test]
+    async fn composition_validates_each_mail_confirmation_invariant() {
+        let message = OutgoingMessage {
+            to: vec!["person@example.com".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: String::new(),
+            body: String::new(),
+        };
+
+        for data in [
+            "{local_id: 0, sent: false, visible: true}",
+            "{local_id: 1, sent: true, visible: true}",
+            "{local_id: 1, sent: false, visible: false}",
+        ] {
+            let script =
+                format!("function run() {{ return JSON.stringify({{ok: true, data: {data}}}); }}");
+            assert_matches!(
+                backend(&script)
+                    .create_draft(CreateDraftRequest {
+                        message: message.clone()
+                    })
+                    .await,
+                Err(MailError::AutomationFailed(_))
+            );
+        }
+        let script = r#"function run() { return JSON.stringify({ok: true, data: {local_id: 1, sent: false, visible: false}}); }"#;
+        assert_matches!(
+            backend(script)
+                .send_message(SendMessageRequest {
+                    message,
+                    confirm: true
+                })
+                .await,
+            Err(MailError::AutomationFailed(_))
+        );
+    }
+
+    #[tokio::test]
+    async fn state_mismatches_are_rejected_for_each_requested_field() {
+        let script = r#"function run() { return JSON.stringify({ok: true, data: {message: {account_id: "a", mailbox_path: ["INBOX"], id: 1}, read: false, flagged: false}}); }"#;
+        let message = MessageRef {
+            account_id: Some("a".to_owned()),
+            mailbox_path: vec!["INBOX".to_owned()],
+            id: 1,
+        };
+        for request in [
+            SetMessageStateRequest {
+                message: message.clone(),
+                read: Some(true),
+                flagged: None,
+            },
+            SetMessageStateRequest {
+                message: message.clone(),
+                read: None,
+                flagged: Some(true),
+            },
+        ] {
+            assert_matches!(
+                backend(script).set_message_state(request).await,
+                Err(MailError::AutomationFailed(_))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn move_returns_only_confirmed_acknowledgement_not_a_synthetic_id() {
+        let script = r#"function run() { return JSON.stringify({ok: true, data: {moved: true, destination: {account_id: "a", path: ["Archive"]}, message: {id: 999}}}); }"#;
+        let result = backend(script)
+            .move_message(MoveMessageRequest {
+                message: MessageRef {
+                    account_id: Some("a".to_owned()),
+                    mailbox_path: vec!["INBOX".to_owned()],
+                    id: 1,
+                },
+                destination: MailboxRef {
+                    account_id: Some("a".to_owned()),
+                    path: vec!["Archive".to_owned()],
+                },
+            })
+            .await
+            .unwrap();
+
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["moved"], true);
+        assert!(value.get("message").is_none());
+
+        for data in [
+            "{moved: false, destination: {account_id: \"a\", path: [\"Archive\"]}}",
+            "{moved: true, destination: {account_id: \"b\", path: [\"Archive\"]}}",
+        ] {
+            let script =
+                format!("function run() {{ return JSON.stringify({{ok: true, data: {data}}}); }}");
+            assert_matches!(
+                backend(&script)
+                    .move_message(MoveMessageRequest {
+                        message: MessageRef {
+                            account_id: Some("a".to_owned()),
+                            mailbox_path: vec!["INBOX".to_owned()],
+                            id: 1,
+                        },
+                        destination: MailboxRef {
+                            account_id: Some("a".to_owned()),
+                            path: vec!["Archive".to_owned()],
+                        },
+                    })
+                    .await,
+                Err(MailError::AutomationFailed(_))
+            );
+        }
     }
 }

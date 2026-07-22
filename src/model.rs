@@ -4,6 +4,9 @@ pub const DEFAULT_RESULT_LIMIT: u16 = 25;
 pub const MAX_RESULT_LIMIT: u16 = 100;
 pub const DEFAULT_BODY_CHARS: u32 = 16_384;
 pub const MAX_BODY_CHARS: u32 = 65_536;
+pub const MAX_COMPOSE_BODY_CHARS: usize = 200_000;
+pub const MAX_RECIPIENTS: usize = 100;
+pub const MAX_SUBJECT_CHARS: usize = 998;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Account {
@@ -113,4 +116,57 @@ pub struct CheckMailRequest {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CheckMailResult {
     pub requested: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct SetMessageStateRequest {
+    pub message: MessageRef,
+    pub read: Option<bool>,
+    pub flagged: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct MessageStateResult {
+    pub message: MessageRef,
+    pub read: bool,
+    pub flagged: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct MoveMessageRequest {
+    pub message: MessageRef,
+    pub destination: MailboxRef,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct MoveMessageResult {
+    pub moved: bool,
+    pub destination: MailboxRef,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct OutgoingMessage {
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct CreateDraftRequest {
+    pub message: OutgoingMessage,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct SendMessageRequest {
+    pub message: OutgoingMessage,
+    pub confirm: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct CompositionResult {
+    pub local_id: i64,
+    pub sent: bool,
+    pub visible: bool,
 }
