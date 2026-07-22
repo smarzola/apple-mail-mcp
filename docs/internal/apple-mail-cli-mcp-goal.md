@@ -70,7 +70,7 @@ The goal is complete only when:
 
 - [x] Milestone 1: Read-only Mail service and CLI
 - [x] Milestone 2: Guarded mutations and message composition
-- [ ] Milestone 3: Stdio MCP parity and operator documentation
+- [x] Milestone 3: Stdio MCP parity and operator documentation
 
 ### Checkpoint Protocol
 
@@ -159,7 +159,12 @@ cargo run -- --help
 cargo run -- mcp --help
 ```
 
-Status: Not started.
+Status: Complete.
+
+- 2026-07-22: Added `apple-mail mcp` using `rmcp` 2.2 with nine generated-schema tools over stdio. MCP uses the shared validation service, returns structured root-object results with JSON text fallbacks, advertises effect-appropriate annotations, and rejects sending unless the process starts with `--allow-send` and the individual call sets `confirm=true`.
+- 2026-07-22: Added a fake-backed protocol integration that initializes client/server over a bidirectional byte stream, lists all nine tools and their output schemas, calls `list_accounts`, verifies structured and fallback content, proves default-deny send stops before the backend, and shuts down cleanly. A separate raw handshake against the compiled `apple-mail mcp` binary produced only valid JSON-RPC response lines for `initialize` and `tools/list`.
+- 2026-07-22: Expanded operator documentation for installation, every CLI/MCP capability, Automation permission, privacy and untrusted content, bounds, Mail/JXA limitations, testing, and the optional roles of packaging, signing, and notarization. Added a focused architecture and trust-boundary document plus the declared MIT license text.
+- 2026-07-22 checkpoint: the retained reviewer reported `CLEAN` with no blocking findings. Final `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (24 library, 4 read CLI, 4 write CLI, and 1 MCP integration test passed), `cargo run -- --help`, `cargo run -- mcp --help`, and `git diff --check` passed.
 
 ## Final Verification
 
@@ -182,6 +187,8 @@ Then verify the durable checkout and remote default branch after fast-forward de
 - 2026-07-22: Chose one binary and a fixed JXA-over-`osascript` adapter for the first complete release; a service boundary permits a future backend without adding it now.
 - 2026-07-22: Chose JSON as the CLI's initial stable output instead of parallel renderers.
 - 2026-07-22: Added explicit stdout piping after a live smoke exposed that `tokio::process::Command::spawn` otherwise inherited child output; a regression test now proves fixed automation output is captured.
+- 2026-07-22: Chose `rmcp` 2.2 as the official Rust MCP SDK and raised the declared MSRV to 1.88 to match its macro dependency graph.
+- 2026-07-22: Kept `send_message` visible so clients receive its schema and safety description, but enforce default-deny policy as a tool error before the backend is called.
 
 ## Resume Protocol
 

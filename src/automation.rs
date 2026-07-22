@@ -40,6 +40,51 @@ pub trait MailBackend: Send + Sync {
     async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult>;
 }
 
+#[async_trait]
+impl<B> MailBackend for Arc<B>
+where
+    B: MailBackend + ?Sized,
+{
+    async fn list_accounts(&self) -> Result<Vec<Account>> {
+        (**self).list_accounts().await
+    }
+
+    async fn list_mailboxes(&self, request: ListMailboxesRequest) -> Result<Vec<Mailbox>> {
+        (**self).list_mailboxes(request).await
+    }
+
+    async fn search_messages(&self, request: SearchRequest) -> Result<Vec<MessageSummary>> {
+        (**self).search_messages(request).await
+    }
+
+    async fn get_message(&self, request: GetMessageRequest) -> Result<MessageDetail> {
+        (**self).get_message(request).await
+    }
+
+    async fn check_mail(&self, request: CheckMailRequest) -> Result<CheckMailResult> {
+        (**self).check_mail(request).await
+    }
+
+    async fn set_message_state(
+        &self,
+        request: SetMessageStateRequest,
+    ) -> Result<MessageStateResult> {
+        (**self).set_message_state(request).await
+    }
+
+    async fn move_message(&self, request: MoveMessageRequest) -> Result<MoveMessageResult> {
+        (**self).move_message(request).await
+    }
+
+    async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult> {
+        (**self).create_draft(request).await
+    }
+
+    async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult> {
+        (**self).send_message(request).await
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct JxaBackend {
     script: Arc<str>,

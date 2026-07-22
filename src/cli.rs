@@ -51,6 +51,12 @@ pub enum Command {
     Draft(ComposeArgs),
     /// Send a new message after explicit confirmation.
     Send(SendArgs),
+    /// Serve MCP tools over stdin/stdout.
+    Mcp {
+        /// Enable the send_message tool; each call must still set confirm=true.
+        #[arg(long)]
+        allow_send: bool,
+    },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -287,6 +293,11 @@ where
                 })
                 .await?,
         )?,
+        Command::Mcp { .. } => {
+            return Err(crate::MailError::Validation(
+                "the mcp command must be run through the stdio server entrypoint".to_owned(),
+            ));
+        }
     };
 
     serde_json::to_writer_pretty(&mut *output, &value)?;

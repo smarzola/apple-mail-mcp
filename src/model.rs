@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_RESULT_LIMIT: u16 = 25;
@@ -8,7 +9,7 @@ pub const MAX_COMPOSE_BODY_CHARS: usize = 200_000;
 pub const MAX_RECIPIENTS: usize = 100;
 pub const MAX_SUBJECT_CHARS: usize = 998;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct Account {
     pub id: String,
     pub name: String,
@@ -16,7 +17,12 @@ pub struct Account {
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct AccountList {
+    pub accounts: Vec<Account>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MailboxRef {
     pub account_id: Option<String>,
     pub path: Vec<String>,
@@ -31,14 +37,19 @@ impl MailboxRef {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct Mailbox {
     pub reference: MailboxRef,
     pub name: String,
     pub unread_count: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct MailboxList {
+    pub mailboxes: Vec<Mailbox>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MessageRef {
     pub account_id: Option<String>,
     pub mailbox_path: Vec<String>,
@@ -54,7 +65,7 @@ impl MessageRef {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MessageSummary {
     pub reference: MessageRef,
     pub message_id: Option<String>,
@@ -66,7 +77,12 @@ pub struct MessageSummary {
     pub size: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct MessageSummaryList {
+    pub messages: Vec<MessageSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MessageDetail {
     #[serde(flatten)]
     pub summary: MessageSummary,
@@ -74,12 +90,12 @@ pub struct MessageDetail {
     pub content_truncated: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct ListMailboxesRequest {
     pub account_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct SearchRequest {
     pub mailbox: MailboxRef,
     pub unread: Option<bool>,
@@ -102,49 +118,49 @@ impl Default for SearchRequest {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct GetMessageRequest {
     pub message: MessageRef,
     pub max_body_chars: u32,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct CheckMailRequest {
     pub account_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct CheckMailResult {
     pub requested: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct SetMessageStateRequest {
     pub message: MessageRef,
     pub read: Option<bool>,
     pub flagged: Option<bool>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MessageStateResult {
     pub message: MessageRef,
     pub read: bool,
     pub flagged: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MoveMessageRequest {
     pub message: MessageRef,
     pub destination: MailboxRef,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MoveMessageResult {
     pub moved: bool,
     pub destination: MailboxRef,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct OutgoingMessage {
     pub to: Vec<String>,
     pub cc: Vec<String>,
@@ -153,18 +169,18 @@ pub struct OutgoingMessage {
     pub body: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct CreateDraftRequest {
     pub message: OutgoingMessage,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct SendMessageRequest {
     pub message: OutgoingMessage,
     pub confirm: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct CompositionResult {
     pub local_id: i64,
     pub sent: bool,
