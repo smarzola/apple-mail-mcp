@@ -8,8 +8,9 @@ use apple_mail_mcp::{
     error::Result,
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MessageDetail, MessageStateResult,
-        MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest, SendMessageRequest,
+        CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
+        ListMailboxesRequest, Mailbox, MessageDetail, MessageSearchResult, MessageStateResult,
+        MoveMessageRequest, MoveMessageResult, ReplyDraftResult, SearchRequest, SendMessageRequest,
         SetMessageStateRequest,
     },
 };
@@ -19,12 +20,19 @@ use serde_json::json;
 
 #[derive(Default)]
 struct FakeBackend {
+    account_calls: AtomicUsize,
+    write_calls: AtomicUsize,
     send_calls: AtomicUsize,
 }
 
 #[async_trait]
 impl MailBackend for FakeBackend {
     async fn list_accounts(&self) -> Result<Vec<Account>> {
+        if self.account_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(apple_mail_mcp::MailError::AutomationFailed(
+                "ACCOUNT-ID EMAIL@example.test MAILBOX SUBJECT SENDER MESSAGE-ID BODY".to_owned(),
+            ));
+        }
         Ok(vec![Account {
             id: "account-1".to_owned(),
             name: "Local Test".to_owned(),
@@ -37,7 +45,11 @@ impl MailBackend for FakeBackend {
         unreachable!("not called by this test")
     }
 
-    async fn search_messages(&self, _: SearchRequest) -> Result<Vec<MessageSummary>> {
+    async fn search_messages(&self, _: SearchRequest) -> Result<MessageSearchResult> {
+        unreachable!("not called by this test")
+    }
+
+    async fn inbox_snapshot(&self, _: InboxSnapshotRequest) -> Result<InboxSnapshot> {
         unreachable!("not called by this test")
     }
 
@@ -46,19 +58,28 @@ impl MailBackend for FakeBackend {
     }
 
     async fn check_mail(&self, _: CheckMailRequest) -> Result<CheckMailResult> {
-        unreachable!("not called by this test")
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CheckMailResult { requested: true })
     }
 
     async fn set_message_state(&self, _: SetMessageStateRequest) -> Result<MessageStateResult> {
-        unreachable!("not called by this test")
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        unreachable!("default policy must reject before calling the backend")
     }
 
     async fn move_message(&self, _: MoveMessageRequest) -> Result<MoveMessageResult> {
-        unreachable!("not called by this test")
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        unreachable!("default policy must reject before calling the backend")
     }
 
     async fn create_draft(&self, _: CreateDraftRequest) -> Result<CompositionResult> {
-        unreachable!("not called by this test")
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        unreachable!("default policy must reject before calling the backend")
+    }
+
+    async fn create_reply_draft(&self, _: CreateReplyDraftRequest) -> Result<ReplyDraftResult> {
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        unreachable!("default policy must reject before calling the backend")
     }
 
     async fn send_message(&self, _: SendMessageRequest) -> Result<CompositionResult> {
@@ -70,7 +91,7 @@ impl MailBackend for FakeBackend {
 #[tokio::test]
 async fn initializes_lists_calls_and_closes_over_stdio_framing() {
     let backend = Arc::new(FakeBackend::default());
-    let server = McpServer::new(backend.clone(), false);
+    let server = McpServer::new(backend.clone(), false, false);
     let (server_stdio, client_stdio) = tokio::io::duplex(64 * 1024);
 
     let server_task = tokio::spawn(async move {
@@ -84,13 +105,20 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
     });
 
     let client = ().serve(client_stdio).await.expect("client should initialize");
+    let server_info = client
+        .peer()
+        .peer_info()
+        .expect("server handshake should include implementation metadata");
+    assert_eq!(server_info.server_info.name, "apple-mail");
+    assert_eq!(server_info.server_info.version, env!("CARGO_PKG_VERSION"));
+
     let tools = client
         .peer()
         .list_tools(None)
         .await
         .expect("tools/list should succeed");
 
-    assert_eq!(tools.tools.len(), 9);
+    assert_eq!(tools.tools.len(), 12);
     assert!(tools.tools.iter().all(|tool| tool.output_schema.is_some()));
     let send_tool = tools
         .tools
@@ -123,6 +151,101 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
         "text fallback should be present"
     );
 
+    let doctor = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("doctor"))
+        .await
+        .expect("doctor should succeed");
+    assert_eq!(doctor.is_error, Some(false));
+    let doctor_text = doctor
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .expect("doctor text")
+        .text
+        .as_str();
+    assert!(!doctor_text.contains("account-1"));
+    assert!(!doctor_text.contains("mail@example.test"));
+    assert!(doctor_text.contains("\"backend_ready\":false"));
+    assert!(doctor_text.contains("\"diagnostic\":\"automation_failed\""));
+    for secret in [
+        "ACCOUNT-ID",
+        "EMAIL@example.test",
+        "MAILBOX",
+        "SUBJECT",
+        "SENDER",
+        "MESSAGE-ID",
+        "BODY",
+    ] {
+        assert!(!doctor_text.contains(secret));
+    }
+
+    let denied_writes = [
+        ("check_mail", json!({})),
+        (
+            "set_message_state",
+            json!({
+                "message": {
+                    "account_id": "account-1",
+                    "mailbox_path": ["INBOX"],
+                    "id": 1
+                },
+                "read": true,
+                "flagged": null
+            }),
+        ),
+        (
+            "move_message",
+            json!({
+                "message": {
+                    "account_id": "account-1",
+                    "mailbox_path": ["INBOX"],
+                    "id": 1
+                },
+                "destination": {
+                    "account_id": "account-1",
+                    "path": ["Archive"]
+                },
+                "confirm": true
+            }),
+        ),
+        (
+            "create_draft",
+            json!({
+                "message": {
+                    "to": ["recipient@example.test"],
+                    "cc": [],
+                    "bcc": [],
+                    "subject": "Draft",
+                    "body": "Body"
+                }
+            }),
+        ),
+        (
+            "create_reply_draft",
+            json!({
+                "message": {
+                    "account_id": "account-1",
+                    "mailbox_path": ["INBOX"],
+                    "id": 1
+                },
+                "body": "Reply"
+            }),
+        ),
+    ];
+    for (name, arguments) in denied_writes {
+        let denied = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(name)
+                    .with_arguments(arguments.as_object().expect("object").clone()),
+            )
+            .await
+            .expect("policy denial should be a tool result");
+        assert_eq!(denied.is_error, Some(true), "{name} should be denied");
+    }
+    assert_eq!(backend.write_calls.load(Ordering::SeqCst), 0);
+
     let send_arguments = json!({
         "message": {
             "to": ["recipient@example.test"],
@@ -147,7 +270,7 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
             .content
             .first()
             .and_then(|content| content.as_text())
-            .is_some_and(|text| text.text.contains("sending is disabled"))
+            .is_some_and(|text| text.text.contains("writes are disabled"))
     );
     assert_eq!(backend.send_calls.load(Ordering::SeqCst), 0);
 

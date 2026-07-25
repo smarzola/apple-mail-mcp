@@ -1,22 +1,30 @@
+use std::time::Instant;
+
+use chrono::DateTime;
+
 use crate::{
     MailBackend,
     error::{MailError, Result},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, MAX_BODY_CHARS, MAX_COMPOSE_BODY_CHARS,
+        CreateReplyDraftRequest, DoctorDiagnostic, DoctorResult, GetMessageRequest, InboxSnapshot,
+        InboxSnapshotRequest, ListMailboxesRequest, MAX_BODY_CHARS, MAX_COMPOSE_BODY_CHARS,
         MAX_RECIPIENTS, MAX_RESULT_LIMIT, MAX_SUBJECT_CHARS, Mailbox, MailboxRef, MessageDetail,
-        MessageRef, MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult,
-        OutgoingMessage, SearchRequest, SendMessageRequest, SetMessageStateRequest,
+        MessageRef, MessageSearchResult, MessageStateResult, MoveMessageRequest, MoveMessageResult,
+        OutgoingMessage, ReplyDraftResult, SearchRequest, SendMessageRequest,
+        SetMessageStateRequest,
     },
 };
 
 const MAX_SELECTOR_CHARS: usize = 256;
 const MAX_MAILBOX_DEPTH: usize = 32;
 const MAX_MAILBOX_PATH_CHARS: usize = 4096;
+const MAX_CURSOR_BYTES: usize = MAX_SELECTOR_CHARS * 12 + 64;
 
 #[derive(Clone, Debug)]
 pub struct MailService<B> {
     backend: B,
+    write_enabled: bool,
     send_enabled: bool,
 }
 
@@ -27,8 +35,14 @@ where
     pub fn new(backend: B) -> Self {
         Self {
             backend,
+            write_enabled: false,
             send_enabled: false,
         }
+    }
+
+    pub fn with_write_enabled(mut self, enabled: bool) -> Self {
+        self.write_enabled = enabled;
+        self
     }
 
     pub fn with_send_enabled(mut self, enabled: bool) -> Self {
@@ -40,12 +54,32 @@ where
         self.backend.list_accounts().await
     }
 
+    pub async fn doctor(&self) -> DoctorResult {
+        let started = Instant::now();
+        match self.backend.list_accounts().await {
+            Ok(accounts) => DoctorResult {
+                platform: std::env::consts::OS.to_owned(),
+                backend_ready: true,
+                account_count: Some(accounts.len() as u64),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                diagnostic: None,
+            },
+            Err(error) => DoctorResult {
+                platform: std::env::consts::OS.to_owned(),
+                backend_ready: false,
+                account_count: None,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                diagnostic: Some(doctor_diagnostic(&error)),
+            },
+        }
+    }
+
     pub async fn list_mailboxes(&self, request: ListMailboxesRequest) -> Result<Vec<Mailbox>> {
         validate_optional_selector("account id", request.account_id.as_deref())?;
         self.backend.list_mailboxes(request).await
     }
 
-    pub async fn search_messages(&self, request: SearchRequest) -> Result<Vec<MessageSummary>> {
+    pub async fn search_messages(&self, request: SearchRequest) -> Result<MessageSearchResult> {
         validate_mailbox(&request.mailbox)?;
         if request.limit == 0 || request.limit > MAX_RESULT_LIMIT {
             return Err(MailError::Validation(format!(
@@ -54,7 +88,31 @@ where
         }
         validate_optional_selector("sender filter", request.sender_contains.as_deref())?;
         validate_optional_selector("subject filter", request.subject_contains.as_deref())?;
+        validate_date_bound("received after", request.received_after.as_deref())?;
+        validate_date_bound("received before", request.received_before.as_deref())?;
+        validate_cursor(request.cursor.as_deref())?;
+        if let (Some(after), Some(before)) = (
+            request.received_after.as_deref(),
+            request.received_before.as_deref(),
+        ) {
+            let after = DateTime::parse_from_rfc3339(after)
+                .expect("date bounds were validated before comparison");
+            let before = DateTime::parse_from_rfc3339(before)
+                .expect("date bounds were validated before comparison");
+            if after >= before {
+                return Err(MailError::Validation(
+                    "received after must be earlier than received before".to_owned(),
+                ));
+            }
+        }
         self.backend.search_messages(request).await
+    }
+
+    pub async fn inbox_snapshot(&self, request: InboxSnapshotRequest) -> Result<InboxSnapshot> {
+        validate_optional_selector("account id", request.account_id.as_deref())?;
+        validate_result_limit("recent limit", request.recent_limit)?;
+        validate_result_limit("unread limit", request.unread_limit)?;
+        self.backend.inbox_snapshot(request).await
     }
 
     pub async fn get_message(&self, request: GetMessageRequest) -> Result<MessageDetail> {
@@ -68,6 +126,7 @@ where
     }
 
     pub async fn check_mail(&self, request: CheckMailRequest) -> Result<CheckMailResult> {
+        self.require_write_enabled()?;
         validate_optional_selector("account id", request.account_id.as_deref())?;
         self.backend.check_mail(request).await
     }
@@ -76,6 +135,7 @@ where
         &self,
         request: SetMessageStateRequest,
     ) -> Result<MessageStateResult> {
+        self.require_write_enabled()?;
         validate_mutation_message(&request.message)?;
         if request.read.is_none() && request.flagged.is_none() {
             return Err(MailError::Validation(
@@ -86,7 +146,13 @@ where
     }
 
     pub async fn move_message(&self, mut request: MoveMessageRequest) -> Result<MoveMessageResult> {
+        self.require_write_enabled()?;
         validate_mutation_message(&request.message)?;
+        if !request.confirm {
+            return Err(MailError::Validation(
+                "moving a message requires explicit confirmation".to_owned(),
+            ));
+        }
         if request.destination.account_id.is_none() {
             request.destination.account_id = request.message.account_id.clone();
         }
@@ -100,11 +166,23 @@ where
     }
 
     pub async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult> {
+        self.require_write_enabled()?;
         validate_outgoing(&request.message)?;
         self.backend.create_draft(request).await
     }
 
+    pub async fn create_reply_draft(
+        &self,
+        request: CreateReplyDraftRequest,
+    ) -> Result<ReplyDraftResult> {
+        self.require_write_enabled()?;
+        validate_mutation_message(&request.message)?;
+        validate_reply_body(&request.body)?;
+        self.backend.create_reply_draft(request).await
+    }
+
     pub async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult> {
+        self.require_write_enabled()?;
         validate_outgoing(&request.message)?;
         if !self.send_enabled {
             return Err(MailError::Validation(
@@ -117,6 +195,27 @@ where
             ));
         }
         self.backend.send_message(request).await
+    }
+
+    fn require_write_enabled(&self) -> Result<()> {
+        if !self.write_enabled {
+            return Err(MailError::Validation(
+                "mailbox writes are disabled by the current server policy".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn doctor_diagnostic(error: &MailError) -> DoctorDiagnostic {
+    match error {
+        MailError::AutomationUnavailable(_) => DoctorDiagnostic::AutomationUnavailable,
+        MailError::AutomationFailed(_) => DoctorDiagnostic::AutomationFailed,
+        MailError::AutomationTimeout(_) => DoctorDiagnostic::AutomationTimeout,
+        MailError::OutputTooLarge => DoctorDiagnostic::OutputTooLarge,
+        MailError::InvalidResponse(_) | MailError::Json(_) => DoctorDiagnostic::InvalidResponse,
+        MailError::Io(_) => DoctorDiagnostic::StartupFailed,
+        MailError::Validation(_) => DoctorDiagnostic::BackendFailed,
     }
 }
 
@@ -161,6 +260,20 @@ fn validate_outgoing(message: &OutgoingMessage) -> Result<()> {
         )));
     }
     if message.body.contains('\0') {
+        return Err(MailError::Validation(
+            "body cannot contain NUL characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reply_body(body: &str) -> Result<()> {
+    if body.chars().count() > MAX_COMPOSE_BODY_CHARS {
+        return Err(MailError::Validation(format!(
+            "body cannot exceed {MAX_COMPOSE_BODY_CHARS} characters"
+        )));
+    }
+    if body.contains('\0') {
         return Err(MailError::Validation(
             "body cannot contain NUL characters".to_owned(),
         ));
@@ -236,6 +349,96 @@ fn validate_optional_selector(name: &str, value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn validate_result_limit(name: &str, value: u16) -> Result<()> {
+    if value == 0 || value > MAX_RESULT_LIMIT {
+        return Err(MailError::Validation(format!(
+            "{name} must be between 1 and {MAX_RESULT_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_date_bound(name: &str, value: Option<&str>) -> Result<()> {
+    if let Some(value) = value
+        && DateTime::parse_from_rfc3339(value).is_err()
+    {
+        return Err(MailError::Validation(format!(
+            "{name} must be an RFC 3339 timestamp"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_cursor(value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.len() > MAX_CURSOR_BYTES || value.chars().any(char::is_control) {
+        return Err(MailError::Validation(
+            "search cursor is not valid".to_owned(),
+        ));
+    }
+    let mut parts = value.split(':');
+    let valid = parts.next() == Some("v1")
+        && parts
+            .next()
+            .is_some_and(|part| part == "none" || part.parse::<i64>().is_ok())
+        && parts
+            .next()
+            .is_some_and(|part| part.parse::<i64>().is_ok_and(|id| id > 0))
+        && parts.next().is_some_and(valid_encoded_account)
+        && parts.next().is_none();
+    if !valid {
+        return Err(MailError::Validation(
+            "search cursor is not valid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_encoded_account(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+                return false;
+            };
+            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+                return false;
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else if bytes[index].is_ascii_alphanumeric()
+            || matches!(
+                bytes[index],
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            )
+        {
+            decoded.push(bytes[index]);
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    let Ok(account) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    !account.trim().is_empty()
+        && account.chars().count() <= MAX_SELECTOR_CHARS
+        && !account.chars().any(char::is_control)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn validate_selector(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(MailError::Validation(format!("{name} cannot be empty")));
@@ -257,6 +460,7 @@ fn validate_selector(name: &str, value: &str) -> Result<()> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use crate::model::{CountSource, MessageSummary, SearchCompleteness};
     use assert_matches::assert_matches;
     use async_trait::async_trait;
 
@@ -265,13 +469,25 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeBackend {
         calls: Arc<Mutex<Vec<&'static str>>>,
+        fail_accounts: bool,
     }
 
     #[async_trait]
     impl MailBackend for FakeBackend {
         async fn list_accounts(&self) -> Result<Vec<Account>> {
             self.calls.lock().unwrap().push("accounts");
-            Ok(Vec::new())
+            if self.fail_accounts {
+                return Err(MailError::AutomationFailed(
+                    "ACCOUNT-ID EMAIL@example.test MAILBOX SUBJECT SENDER MESSAGE-ID BODY"
+                        .to_owned(),
+                ));
+            }
+            Ok(vec![Account {
+                id: "private-account-id".to_owned(),
+                name: "Private account".to_owned(),
+                email_addresses: vec!["private@example.test".to_owned()],
+                enabled: true,
+            }])
         }
 
         async fn list_mailboxes(&self, _: ListMailboxesRequest) -> Result<Vec<Mailbox>> {
@@ -279,9 +495,30 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn search_messages(&self, _: SearchRequest) -> Result<Vec<MessageSummary>> {
+        async fn search_messages(&self, _: SearchRequest) -> Result<MessageSearchResult> {
             self.calls.lock().unwrap().push("search");
-            Ok(Vec::new())
+            Ok(MessageSearchResult {
+                messages: Vec::new(),
+                scanned_count: 0,
+                matched_count: 0,
+                has_more: false,
+                next_cursor: None,
+                completeness: SearchCompleteness::Complete,
+            })
+        }
+
+        async fn inbox_snapshot(&self, _: InboxSnapshotRequest) -> Result<InboxSnapshot> {
+            self.calls.lock().unwrap().push("inbox");
+            Ok(InboxSnapshot {
+                mailbox: MailboxRef::inbox(None),
+                total_count: 0,
+                unread_count: 0,
+                unread_count_source: CountSource::ExactBulkProjection,
+                mail_reported_unread_count: 0,
+                recent_messages: Vec::new(),
+                unread_messages: Vec::new(),
+                completeness: SearchCompleteness::Complete,
+            })
         }
 
         async fn get_message(&self, _: GetMessageRequest) -> Result<MessageDetail> {
@@ -340,6 +577,24 @@ mod tests {
             })
         }
 
+        async fn create_reply_draft(
+            &self,
+            request: CreateReplyDraftRequest,
+        ) -> Result<ReplyDraftResult> {
+            self.calls.lock().unwrap().push("reply");
+            Ok(ReplyDraftResult {
+                source: request.message,
+                local_id: 9,
+                subject: "Re: Subject".to_owned(),
+                to: vec!["sender@example.com".to_owned()],
+                cc: Vec::new(),
+                sent: false,
+                draft_present: true,
+                visible: true,
+                content_verified: true,
+            })
+        }
+
         async fn send_message(&self, _: SendMessageRequest) -> Result<CompositionResult> {
             self.calls.lock().unwrap().push("send");
             Ok(CompositionResult {
@@ -381,6 +636,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn doctor_reports_readiness_without_account_values() {
+        let ready = MailService::new(FakeBackend::default()).doctor().await;
+        assert!(ready.backend_ready);
+        assert_eq!(ready.account_count, Some(1));
+        assert_eq!(ready.diagnostic, None);
+        let output = serde_json::to_string(&ready).unwrap();
+        assert!(!output.contains("private-account-id"));
+        assert!(!output.contains("private@example.test"));
+        assert!(!output.contains("Private account"));
+
+        let unavailable = MailService::new(FakeBackend {
+            fail_accounts: true,
+            ..FakeBackend::default()
+        })
+        .doctor()
+        .await;
+        assert!(!unavailable.backend_ready);
+        assert_eq!(unavailable.account_count, None);
+        assert_eq!(
+            unavailable.diagnostic,
+            Some(DoctorDiagnostic::AutomationFailed)
+        );
+        let output = serde_json::to_string(&unavailable).unwrap();
+        for secret in [
+            "ACCOUNT-ID",
+            "EMAIL@example.test",
+            "MAILBOX",
+            "SUBJECT",
+            "SENDER",
+            "MESSAGE-ID",
+            "BODY",
+        ] {
+            assert!(!output.contains(secret));
+        }
+    }
+
+    #[tokio::test]
     async fn all_invalid_bounds_and_selectors_fail_before_backend() {
         let backend = FakeBackend::default();
         let calls = backend.calls.clone();
@@ -403,6 +695,49 @@ mod tests {
             };
             assert_matches!(
                 service.search_messages(request).await,
+                Err(MailError::Validation(_))
+            );
+        }
+        for request in [
+            SearchRequest {
+                received_after: Some("not-a-date".to_owned()),
+                ..SearchRequest::default()
+            },
+            SearchRequest {
+                received_after: Some("2026-07-26T00:00:00Z".to_owned()),
+                received_before: Some("2026-07-25T00:00:00Z".to_owned()),
+                ..SearchRequest::default()
+            },
+            SearchRequest {
+                cursor: Some("not-a-cursor".to_owned()),
+                ..SearchRequest::default()
+            },
+            SearchRequest {
+                cursor: Some("v1:123:0:account".to_owned()),
+                ..SearchRequest::default()
+            },
+            SearchRequest {
+                cursor: Some("v1:123:1:%ZZ".to_owned()),
+                ..SearchRequest::default()
+            },
+        ] {
+            assert_matches!(
+                service.search_messages(request).await,
+                Err(MailError::Validation(_))
+            );
+        }
+        for request in [
+            InboxSnapshotRequest {
+                recent_limit: 0,
+                ..InboxSnapshotRequest::default()
+            },
+            InboxSnapshotRequest {
+                unread_limit: MAX_RESULT_LIMIT + 1,
+                ..InboxSnapshotRequest::default()
+            },
+        ] {
+            assert_matches!(
+                service.inbox_snapshot(request).await,
                 Err(MailError::Validation(_))
             );
         }
@@ -475,6 +810,22 @@ mod tests {
         assert!(calls.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn generated_cursor_accepts_max_length_percent_escaped_account() {
+        let account = "😀".repeat(MAX_SELECTOR_CHARS);
+        let encoded = account
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect::<String>();
+        let cursor = format!("v1:1784966400000:42:{encoded}");
+        validate_cursor(Some(&cursor)).unwrap();
+        assert_matches!(
+            validate_cursor(Some("v1:1784966400000:42:%F0%9F")),
+            Err(MailError::Validation(_))
+        );
+    }
+
     #[tokio::test]
     async fn valid_read_operations_reach_the_backend() {
         let backend = FakeBackend::default();
@@ -484,6 +835,10 @@ mod tests {
         service.list_accounts().await.unwrap();
         service
             .list_mailboxes(ListMailboxesRequest::default())
+            .await
+            .unwrap();
+        service
+            .inbox_snapshot(InboxSnapshotRequest::default())
             .await
             .unwrap();
         service
@@ -497,14 +852,9 @@ mod tests {
             })
             .await
             .unwrap();
-        service
-            .check_mail(CheckMailRequest::default())
-            .await
-            .unwrap();
-
         assert_eq!(
             *calls.lock().unwrap(),
-            vec!["accounts", "mailboxes", "get", "check"]
+            vec!["accounts", "mailboxes", "inbox", "get"]
         );
     }
 
@@ -530,7 +880,7 @@ mod tests {
     async fn invalid_mutations_fail_before_backend() {
         let backend = FakeBackend::default();
         let calls = backend.calls.clone();
-        let service = MailService::new(backend);
+        let service = MailService::new(backend).with_write_enabled(true);
 
         assert_matches!(
             service
@@ -562,6 +912,7 @@ mod tests {
                         account_id: Some("account-1".to_owned()),
                         path: vec!["INBOX".to_owned()],
                     },
+                    confirm: true,
                 })
                 .await,
             Err(MailError::Validation(_))
@@ -574,9 +925,23 @@ mod tests {
                         account_id: None,
                         path: vec!["INBOX".to_owned()],
                     },
+                    confirm: true,
                 })
                 .await,
             Err(MailError::Validation(message)) if message.contains("differ")
+        );
+        assert_matches!(
+            service
+                .move_message(MoveMessageRequest {
+                    message: message(1),
+                    destination: MailboxRef {
+                        account_id: None,
+                        path: vec!["Archive".to_owned()],
+                    },
+                    confirm: false,
+                })
+                .await,
+            Err(MailError::Validation(message)) if message.contains("confirmation")
         );
 
         let invalid_messages = [
@@ -615,6 +980,75 @@ mod tests {
                 Err(MailError::Validation(_))
             );
         }
+        for body in [
+            "bad\0body".to_owned(),
+            "x".repeat(MAX_COMPOSE_BODY_CHARS + 1),
+        ] {
+            assert_matches!(
+                service
+                    .create_reply_draft(CreateReplyDraftRequest {
+                        message: message(1),
+                        body,
+                    })
+                    .await,
+                Err(MailError::Validation(_))
+            );
+        }
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_policy_denies_every_mutation_before_backend() {
+        let backend = FakeBackend::default();
+        let calls = backend.calls.clone();
+        let service = MailService::new(backend);
+
+        assert!(
+            service
+                .check_mail(CheckMailRequest::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .set_message_state(SetMessageStateRequest {
+                    message: message(1),
+                    read: Some(true),
+                    flagged: None,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .move_message(MoveMessageRequest {
+                    message: message(1),
+                    destination: MailboxRef {
+                        account_id: None,
+                        path: vec!["Archive".to_owned()],
+                    },
+                    confirm: true,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .create_draft(CreateDraftRequest {
+                    message: outgoing(),
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .create_reply_draft(CreateReplyDraftRequest {
+                    message: message(1),
+                    body: "Reply".to_owned(),
+                })
+                .await
+                .is_err()
+        );
         assert!(calls.lock().unwrap().is_empty());
     }
 
@@ -633,7 +1067,9 @@ mod tests {
             Err(MailError::Validation(message)) if message.contains("disabled")
         );
 
-        let allowed = MailService::new(backend).with_send_enabled(true);
+        let allowed = MailService::new(backend)
+            .with_write_enabled(true)
+            .with_send_enabled(true);
         assert_matches!(
             allowed
                 .send_message(SendMessageRequest {
@@ -658,7 +1094,7 @@ mod tests {
     async fn valid_mutations_reach_backend() {
         let backend = FakeBackend::default();
         let calls = backend.calls.clone();
-        let service = MailService::new(backend);
+        let service = MailService::new(backend).with_write_enabled(true);
 
         service
             .set_message_state(SetMessageStateRequest {
@@ -675,6 +1111,7 @@ mod tests {
                     account_id: Some("account-1".to_owned()),
                     path: vec!["Archive".to_owned()],
                 },
+                confirm: true,
             })
             .await
             .unwrap();
@@ -684,14 +1121,24 @@ mod tests {
             })
             .await
             .unwrap();
+        service
+            .create_reply_draft(CreateReplyDraftRequest {
+                message: message(1),
+                body: "Reply".to_owned(),
+            })
+            .await
+            .unwrap();
 
-        assert_eq!(*calls.lock().unwrap(), vec!["state", "move", "draft"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["state", "move", "draft", "reply"]
+        );
     }
 
     #[tokio::test]
     async fn move_inherits_and_dispatches_the_source_account() {
         let backend = FakeBackend::default();
-        let service = MailService::new(backend);
+        let service = MailService::new(backend).with_write_enabled(true);
 
         let result = service
             .move_message(MoveMessageRequest {
@@ -700,6 +1147,7 @@ mod tests {
                     account_id: None,
                     path: vec!["Archive".to_owned()],
                 },
+                confirm: true,
             })
             .await
             .unwrap();

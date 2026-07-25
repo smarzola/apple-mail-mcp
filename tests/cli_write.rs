@@ -5,8 +5,9 @@ use apple_mail_mcp::{
     cli::{Cli, run},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MessageDetail, MessageStateResult,
-        MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest, SendMessageRequest,
+        CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
+        ListMailboxesRequest, Mailbox, MessageDetail, MessageSearchResult, MessageStateResult,
+        MoveMessageRequest, MoveMessageResult, ReplyDraftResult, SearchRequest, SendMessageRequest,
         SetMessageStateRequest,
     },
 };
@@ -34,8 +35,15 @@ impl MailBackend for FakeBackend {
     async fn search_messages(
         &self,
         _: SearchRequest,
-    ) -> apple_mail_mcp::Result<Vec<MessageSummary>> {
+    ) -> apple_mail_mcp::Result<MessageSearchResult> {
         unreachable!("write test invoked search")
+    }
+
+    async fn inbox_snapshot(
+        &self,
+        _: InboxSnapshotRequest,
+    ) -> apple_mail_mcp::Result<InboxSnapshot> {
+        unreachable!("write test invoked inbox snapshot")
     }
 
     async fn get_message(&self, _: GetMessageRequest) -> apple_mail_mcp::Result<MessageDetail> {
@@ -91,6 +99,27 @@ impl MailBackend for FakeBackend {
         })
     }
 
+    async fn create_reply_draft(
+        &self,
+        request: CreateReplyDraftRequest,
+    ) -> apple_mail_mcp::Result<ReplyDraftResult> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("reply:{}:{}", request.message.id, request.body));
+        Ok(ReplyDraftResult {
+            source: request.message,
+            local_id: 12,
+            subject: "Re: Hello".to_owned(),
+            to: vec!["sender@example.com".to_owned()],
+            cc: Vec::new(),
+            sent: false,
+            draft_present: true,
+            visible: true,
+            content_verified: true,
+        })
+    }
+
     async fn send_message(
         &self,
         request: SendMessageRequest,
@@ -111,7 +140,7 @@ impl MailBackend for FakeBackend {
 async fn state_move_and_draft_use_typed_requests() {
     let backend = FakeBackend::default();
     let calls = backend.calls.clone();
-    let service = MailService::new(backend);
+    let service = MailService::new(backend).with_write_enabled(true);
 
     let commands = [
         vec![
@@ -139,6 +168,7 @@ async fn state_move_and_draft_use_typed_requests() {
             "7",
             "--destination-mailbox",
             "Archive",
+            "--confirm-move",
         ],
         vec![
             "apple-mail",
@@ -149,6 +179,18 @@ async fn state_move_and_draft_use_typed_requests() {
             "Hello",
             "--body",
             "Body",
+        ],
+        vec![
+            "apple-mail",
+            "reply",
+            "--account",
+            "account-1",
+            "--mailbox",
+            "INBOX",
+            "--id",
+            "7",
+            "--body",
+            "Reply body",
         ],
     ];
 
@@ -165,7 +207,8 @@ async fn state_move_and_draft_use_typed_requests() {
         [
             "state:7:Some(true):Some(false)",
             "move:account-1:Archive",
-            "draft:person@example.com"
+            "draft:person@example.com",
+            "reply:7:Reply body"
         ]
     );
 }
@@ -191,7 +234,9 @@ async fn send_requires_policy_and_cli_confirmation() {
             .is_err()
     );
 
-    let allowed = MailService::new(backend).with_send_enabled(true);
+    let allowed = MailService::new(backend)
+        .with_write_enabled(true)
+        .with_send_enabled(true);
     assert!(
         run(Cli::try_parse_from(args).unwrap(), &allowed, &mut output)
             .await
@@ -221,7 +266,7 @@ async fn send_requires_policy_and_cli_confirmation() {
 async fn invalid_recipient_fails_without_backend_call() {
     let backend = FakeBackend::default();
     let calls = backend.calls.clone();
-    let service = MailService::new(backend);
+    let service = MailService::new(backend).with_write_enabled(true);
     let args = ["apple-mail", "draft", "--to", "not-an-address"];
     let mut output = Vec::new();
 
@@ -238,10 +283,39 @@ async fn invalid_recipient_fails_without_backend_call() {
 async fn unscoped_move_is_rejected_without_backend_call() {
     let backend = FakeBackend::default();
     let calls = backend.calls.clone();
-    let service = MailService::new(backend);
+    let service = MailService::new(backend).with_write_enabled(true);
     let args = [
         "apple-mail",
         "move",
+        "--mailbox",
+        "INBOX",
+        "--id",
+        "7",
+        "--destination-mailbox",
+        "Archive",
+        "--confirm-move",
+    ];
+    let mut output = Vec::new();
+
+    assert!(
+        run(Cli::try_parse_from(args).unwrap(), &service, &mut output)
+            .await
+            .is_err()
+    );
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(output.is_empty());
+}
+
+#[tokio::test]
+async fn move_requires_cli_confirmation_without_backend_call() {
+    let backend = FakeBackend::default();
+    let calls = backend.calls.clone();
+    let service = MailService::new(backend).with_write_enabled(true);
+    let args = [
+        "apple-mail",
+        "move",
+        "--account",
+        "account-1",
         "--mailbox",
         "INBOX",
         "--id",
@@ -258,4 +332,10 @@ async fn unscoped_move_is_rejected_without_backend_call() {
     );
     assert!(calls.lock().unwrap().is_empty());
     assert!(output.is_empty());
+}
+
+#[test]
+fn mcp_send_opt_in_requires_write_opt_in() {
+    assert!(Cli::try_parse_from(["apple-mail", "mcp", "--allow-send"]).is_err());
+    assert!(Cli::try_parse_from(["apple-mail", "mcp", "--allow-write", "--allow-send"]).is_ok());
 }

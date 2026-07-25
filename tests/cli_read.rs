@@ -4,10 +4,12 @@ use apple_mail_mcp::{
     MailBackend, MailService,
     cli::{Cli, run},
     model::{
-        Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail,
-        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest,
-        SendMessageRequest, SetMessageStateRequest,
+        Account, CheckMailRequest, CheckMailResult, CompositionResult, CountSource,
+        CreateDraftRequest, CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot,
+        InboxSnapshotRequest, ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail,
+        MessageSearchResult, MessageStateResult, MessageSummary, MoveMessageRequest,
+        MoveMessageResult, ReplyDraftResult, SearchCompleteness, SearchRequest, SendMessageRequest,
+        SetMessageStateRequest,
     },
 };
 use async_trait::async_trait;
@@ -25,7 +27,7 @@ impl MailBackend for FakeBackend {
     async fn list_accounts(&self) -> apple_mail_mcp::Result<Vec<Account>> {
         if self.fail {
             return Err(apple_mail_mcp::MailError::AutomationFailed(
-                "classified failure".to_owned(),
+                "ACCOUNT-ID EMAIL@example.test MAILBOX SUBJECT SENDER MESSAGE-ID BODY".to_owned(),
             ));
         }
         Ok(vec![Account {
@@ -44,15 +46,39 @@ impl MailBackend for FakeBackend {
             reference: MailboxRef::inbox(Some("account-1".to_owned())),
             name: "INBOX".to_owned(),
             unread_count: 2,
+            unread_count_source: CountSource::MailReported,
         }])
     }
 
     async fn search_messages(
         &self,
         request: SearchRequest,
-    ) -> apple_mail_mcp::Result<Vec<MessageSummary>> {
+    ) -> apple_mail_mcp::Result<MessageSearchResult> {
         self.searches.lock().unwrap().push(request);
-        Ok(Vec::new())
+        Ok(MessageSearchResult {
+            messages: Vec::new(),
+            scanned_count: 10,
+            matched_count: 0,
+            has_more: false,
+            next_cursor: None,
+            completeness: SearchCompleteness::Complete,
+        })
+    }
+
+    async fn inbox_snapshot(
+        &self,
+        request: InboxSnapshotRequest,
+    ) -> apple_mail_mcp::Result<InboxSnapshot> {
+        Ok(InboxSnapshot {
+            mailbox: MailboxRef::inbox(request.account_id),
+            total_count: 10,
+            unread_count: 2,
+            unread_count_source: CountSource::ExactBulkProjection,
+            mail_reported_unread_count: 1,
+            recent_messages: Vec::new(),
+            unread_messages: Vec::new(),
+            completeness: SearchCompleteness::Complete,
+        })
     }
 
     async fn get_message(
@@ -101,6 +127,13 @@ impl MailBackend for FakeBackend {
         unreachable!("read-only test invoked draft creation")
     }
 
+    async fn create_reply_draft(
+        &self,
+        _: CreateReplyDraftRequest,
+    ) -> apple_mail_mcp::Result<ReplyDraftResult> {
+        unreachable!("read-only test invoked reply draft creation")
+    }
+
     async fn send_message(
         &self,
         _: SendMessageRequest,
@@ -123,6 +156,49 @@ async fn accounts_emit_stable_json() {
 }
 
 #[tokio::test]
+async fn doctor_emits_only_readiness_metadata() {
+    let service = MailService::new(FakeBackend::default());
+    let cli = Cli::try_parse_from(["apple-mail", "doctor"]).unwrap();
+    let mut output = Vec::new();
+
+    run(cli, &service, &mut output).await.unwrap();
+
+    let text = String::from_utf8(output).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["backend_ready"], true);
+    assert_eq!(value["account_count"], 1);
+    assert!(!text.contains("account-1"));
+    assert!(!text.contains("person@example.com"));
+    assert!(!text.contains("Personal"));
+
+    let failed = MailService::new(FakeBackend {
+        fail: true,
+        ..FakeBackend::default()
+    });
+    let mut output = Vec::new();
+    run(
+        Cli::try_parse_from(["apple-mail", "doctor"]).unwrap(),
+        &failed,
+        &mut output,
+    )
+    .await
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("\"diagnostic\": \"automation_failed\""));
+    for secret in [
+        "ACCOUNT-ID",
+        "EMAIL@example.test",
+        "MAILBOX",
+        "SUBJECT",
+        "SENDER",
+        "MESSAGE-ID",
+        "BODY",
+    ] {
+        assert!(!text.contains(secret));
+    }
+}
+
+#[tokio::test]
 async fn search_preserves_repeated_mailbox_components() {
     let backend = FakeBackend::default();
     let searches = backend.searches.clone();
@@ -138,6 +214,8 @@ async fn search_preserves_repeated_mailbox_components() {
         "Customer",
         "--unread",
         "true",
+        "--received-after",
+        "2026-07-01T00:00:00Z",
         "--limit",
         "7",
     ])
@@ -145,11 +223,18 @@ async fn search_preserves_repeated_mailbox_components() {
     let mut output = Vec::new();
 
     run(cli, &service, &mut output).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["scanned_count"], 10);
+    assert_eq!(value["completeness"], "complete");
 
     let request = searches.lock().unwrap().pop().unwrap();
     assert_eq!(request.mailbox.account_id.as_deref(), Some("account-1"));
     assert_eq!(request.mailbox.path, ["Projects", "Customer"]);
     assert_eq!(request.unread, Some(true));
+    assert_eq!(
+        request.received_after.as_deref(),
+        Some("2026-07-01T00:00:00Z")
+    );
     assert_eq!(request.limit, 7);
 }
 
@@ -157,7 +242,7 @@ async fn search_preserves_repeated_mailbox_components() {
 async fn mailboxes_show_and_check_emit_json() {
     let backend = FakeBackend::default();
     let gets = backend.gets.clone();
-    let service = MailService::new(backend);
+    let service = MailService::new(backend).with_write_enabled(true);
 
     let mut mailboxes = Vec::new();
     run(
@@ -169,6 +254,29 @@ async fn mailboxes_show_and_check_emit_json() {
     .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&mailboxes).unwrap();
     assert_eq!(value[0]["reference"]["account_id"], "account-1");
+    assert_eq!(value[0]["unread_count_source"], "mail_reported");
+
+    let mut inbox = Vec::new();
+    run(
+        Cli::try_parse_from([
+            "apple-mail",
+            "inbox",
+            "--account",
+            "account-1",
+            "--recent-limit",
+            "3",
+            "--unread-limit",
+            "4",
+        ])
+        .unwrap(),
+        &service,
+        &mut inbox,
+    )
+    .await
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&inbox).unwrap();
+    assert_eq!(value["unread_count"], 2);
+    assert_eq!(value["mail_reported_unread_count"], 1);
 
     let mut shown = Vec::new();
     run(

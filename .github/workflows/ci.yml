@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify on macOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      - name: Check formatting
+        run: cargo +1.88.0 fmt --check
+      - name: Lint
+        run: cargo +1.88.0 clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo +1.88.0 test --locked
+      - name: Build release binary
+        run: cargo +1.88.0 build --release --locked

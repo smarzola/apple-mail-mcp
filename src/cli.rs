@@ -6,9 +6,10 @@ use crate::{
     MailBackend, MailService,
     error::Result,
     model::{
-        CheckMailRequest, CreateDraftRequest, DEFAULT_BODY_CHARS, DEFAULT_RESULT_LIMIT,
-        GetMessageRequest, ListMailboxesRequest, MailboxRef, MessageRef, MoveMessageRequest,
-        OutgoingMessage, SearchRequest, SendMessageRequest, SetMessageStateRequest,
+        CheckMailRequest, CreateDraftRequest, CreateReplyDraftRequest, DEFAULT_BODY_CHARS,
+        DEFAULT_RESULT_LIMIT, DEFAULT_SNAPSHOT_LIMIT, GetMessageRequest, InboxSnapshotRequest,
+        ListMailboxesRequest, MailboxRef, MessageRef, MoveMessageRequest, OutgoingMessage,
+        SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -35,6 +36,10 @@ pub enum Command {
     },
     /// Search a mailbox and return bounded message metadata.
     Search(SearchArgs),
+    /// Return exact Inbox counts plus bounded recent and unread summaries.
+    Inbox(InboxArgs),
+    /// Diagnose local platform and Mail Automation readiness without exposing account values.
+    Doctor,
     /// Show one message, including a bounded plain-text body.
     Show(MessageArgs),
     /// Ask Mail to check all accounts or one account for new messages.
@@ -49,12 +54,17 @@ pub enum Command {
     Move(MoveArgs),
     /// Create and display a draft in Mail without sending it.
     Draft(ComposeArgs),
+    /// Create and display an unsent native reply draft.
+    Reply(ReplyArgs),
     /// Send a new message after explicit confirmation.
     Send(SendArgs),
     /// Serve MCP tools over stdin/stdout.
     Mcp {
-        /// Enable the send_message tool; each call must still set confirm=true.
+        /// Enable state changes, moves, drafts, replies, and checking for new mail.
         #[arg(long)]
+        allow_write: bool,
+        /// Permit send calls with --allow-write; each call must also set confirm=true.
+        #[arg(long, requires = "allow_write")]
         allow_send: bool,
     },
 }
@@ -98,9 +108,31 @@ pub struct SearchArgs {
     /// Case-insensitive substring match against the subject.
     #[arg(long)]
     pub subject: Option<String>,
+    /// Inclusive RFC 3339 lower bound for received messages.
+    #[arg(long)]
+    pub received_after: Option<String>,
+    /// Exclusive RFC 3339 upper bound for received messages.
+    #[arg(long)]
+    pub received_before: Option<String>,
+    /// Opaque continuation cursor returned by a previous search.
+    #[arg(long)]
+    pub cursor: Option<String>,
     /// Maximum messages returned (1-100).
     #[arg(long, default_value_t = DEFAULT_RESULT_LIMIT)]
     pub limit: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct InboxArgs {
+    /// Mail account ID. Omit it to use Mail's aggregate INBOX.
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Maximum recent message summaries returned (1-100).
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_LIMIT)]
+    pub recent_limit: u16,
+    /// Maximum unread message summaries returned (1-100).
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_LIMIT)]
+    pub unread_limit: u16,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -160,6 +192,18 @@ pub struct MoveArgs {
     /// One destination path component. Repeat for nested mailboxes.
     #[arg(long = "destination-mailbox", required = true)]
     pub destination_path: Vec<String>,
+    /// Confirm that this invocation should move the message.
+    #[arg(long)]
+    pub confirm_move: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ReplyArgs {
+    #[command(flatten)]
+    pub message: MessageRefArgs,
+    /// Plain-text reply body inserted above Mail's quoted content.
+    #[arg(long, default_value = "")]
+    pub body: String,
 }
 
 impl MoveArgs {
@@ -236,10 +280,23 @@ where
                     flagged: args.flagged,
                     sender_contains: args.sender,
                     subject_contains: args.subject,
+                    received_after: args.received_after,
+                    received_before: args.received_before,
+                    cursor: args.cursor,
                     limit: args.limit,
                 })
                 .await?,
         )?,
+        Command::Inbox(args) => serde_json::to_value(
+            service
+                .inbox_snapshot(InboxSnapshotRequest {
+                    account_id: args.account,
+                    recent_limit: args.recent_limit,
+                    unread_limit: args.unread_limit,
+                })
+                .await?,
+        )?,
+        Command::Doctor => serde_json::to_value(service.doctor().await)?,
         Command::Show(args) => {
             let max_body_chars = args.max_body_chars;
             serde_json::to_value(
@@ -274,6 +331,7 @@ where
                     .move_message(MoveMessageRequest {
                         message: args.message.reference(),
                         destination,
+                        confirm: args.confirm_move,
                     })
                     .await?,
             )?
@@ -282,6 +340,14 @@ where
             service
                 .create_draft(CreateDraftRequest {
                     message: args.message(),
+                })
+                .await?,
+        )?,
+        Command::Reply(args) => serde_json::to_value(
+            service
+                .create_reply_draft(CreateReplyDraftRequest {
+                    message: args.message.reference(),
+                    body: args.body,
                 })
                 .await?,
         )?,

@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build universal macOS release
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+      - name: Install Rust targets
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup target add --toolchain 1.88.0 aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo +1.88.0 build --release --locked --target aarch64-apple-darwin
+          cargo +1.88.0 build --release --locked --target x86_64-apple-darwin
+          mkdir -p build
+          lipo -create \
+            target/aarch64-apple-darwin/release/apple-mail \
+            target/x86_64-apple-darwin/release/apple-mail \
+            -output build/apple-mail
+          lipo build/apple-mail -verify_arch arm64 x86_64
+      - name: Optionally sign and notarize
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          signing_values="${MACOS_CERTIFICATE_BASE64}${MACOS_CERTIFICATE_PASSWORD}${MACOS_SIGNING_IDENTITY}"
+          notarization_values="${APPLE_ID}${APPLE_TEAM_ID}${APPLE_APP_PASSWORD}"
+
+          if [[ -z "${signing_values}" && -z "${notarization_values}" ]]; then
+            echo "Signing credentials are absent; producing an unsigned artifact."
+            exit 0
+          fi
+
+          if [[ -z "${MACOS_CERTIFICATE_BASE64}" || -z "${MACOS_CERTIFICATE_PASSWORD}" || -z "${MACOS_SIGNING_IDENTITY}" ]]; then
+            echo "All MACOS_CERTIFICATE_* and MACOS_SIGNING_IDENTITY secrets are required when signing is configured." >&2
+            exit 1
+          fi
+
+          keychain_path="${RUNNER_TEMP}/apple-mail-signing.keychain-db"
+          certificate_path="${RUNNER_TEMP}/apple-mail-certificate.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "${MACOS_CERTIFICATE_BASE64}" | base64 --decode > "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
+          security list-keychain -d user -s "${keychain_path}"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain_path}"
+          codesign --force --options runtime --timestamp --sign "${MACOS_SIGNING_IDENTITY}" build/apple-mail
+          codesign --verify --deep --strict --verbose=2 build/apple-mail
+
+          if [[ -z "${notarization_values}" ]]; then
+            echo "Notarization credentials are absent; publishing the signed artifact without notarization."
+            exit 0
+          fi
+          if [[ -z "${APPLE_ID}" || -z "${APPLE_TEAM_ID}" || -z "${APPLE_APP_PASSWORD}" ]]; then
+            echo "APPLE_ID, APPLE_TEAM_ID, and APPLE_APP_PASSWORD are all required for notarization." >&2
+            exit 1
+          fi
+
+          ditto -c -k --keepParent build/apple-mail build/apple-mail-notarization.zip
+          xcrun notarytool submit build/apple-mail-notarization.zip \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_PASSWORD}" \
+            --wait
+      - name: Package artifacts and metadata
+        run: ./scripts/package-release.sh "${GITHUB_REF_NAME#v}" build/apple-mail
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/apple-mail-mcp-${version}-macos-universal.tar.gz" \
+            "dist/apple-mail-mcp-${version}-macos-universal.tar.gz.sha256" \
+            "dist/apple-mail-mcp.rb" \
+            --generate-notes \
+            --verify-tag

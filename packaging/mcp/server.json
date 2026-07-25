@@ -1,0 +1,12 @@
+{
+  "name": "apple-mail",
+  "version": "0.2.0",
+  "transport": {
+    "type": "stdio",
+    "command": "apple-mail",
+    "args": [
+      "mcp"
+    ]
+  },
+  "default_policy": "read-only"
+}
