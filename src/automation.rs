@@ -13,9 +13,10 @@ use crate::{
     error::{MailError, Result},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, InboxSnapshot, InboxSnapshotRequest, ListMailboxesRequest, Mailbox,
-        MessageDetail, MessageRef, MessageSearchResult, MessageStateResult, MoveMessageRequest,
-        MoveMessageResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
+        CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
+        ListMailboxesRequest, Mailbox, MessageDetail, MessageRef, MessageSearchResult,
+        MessageStateResult, MoveMessageRequest, MoveMessageResult, ReplyDraftResult, SearchRequest,
+        SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -38,6 +39,10 @@ pub trait MailBackend: Send + Sync {
     ) -> Result<MessageStateResult>;
     async fn move_message(&self, request: MoveMessageRequest) -> Result<MoveMessageResult>;
     async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult>;
+    async fn create_reply_draft(
+        &self,
+        request: CreateReplyDraftRequest,
+    ) -> Result<ReplyDraftResult>;
     async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult>;
 }
 
@@ -83,6 +88,13 @@ where
 
     async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult> {
         (**self).create_draft(request).await
+    }
+
+    async fn create_reply_draft(
+        &self,
+        request: CreateReplyDraftRequest,
+    ) -> Result<ReplyDraftResult> {
+        (**self).create_reply_draft(request).await
     }
 
     async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult> {
@@ -341,6 +353,32 @@ impl MailBackend for JxaBackend {
         Ok(result)
     }
 
+    async fn create_reply_draft(
+        &self,
+        request: CreateReplyDraftRequest,
+    ) -> Result<ReplyDraftResult> {
+        let result: ReplyDraftResult = self.call("create_reply_draft", &request).await?;
+        if result.source != request.message
+            || result.local_id <= 0
+            || result.sent
+            || !result.draft_present
+            || !result.visible
+            || !result.content_verified
+            || result.to.is_empty()
+            || result.subject.trim().is_empty()
+            || result
+                .to
+                .iter()
+                .chain(&result.cc)
+                .any(|address| address.trim().is_empty() || address.chars().any(char::is_control))
+        {
+            return Err(MailError::AutomationFailed(
+                "Mail did not confirm reply draft creation".to_owned(),
+            ));
+        }
+        Ok(result)
+    }
+
     async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult> {
         let result: CompositionResult = self.call("send_message", &request).await?;
         if result.local_id <= 0 || !result.sent {
@@ -369,9 +407,9 @@ mod tests {
     use crate::{
         MailBackend,
         model::{
-            CreateDraftRequest, InboxSnapshot, MailboxRef, MessageRef, MessageSearchResult,
-            MessageSummary, MoveMessageRequest, OutgoingMessage, SearchRequest, SendMessageRequest,
-            SetMessageStateRequest,
+            CreateDraftRequest, CreateReplyDraftRequest, InboxSnapshot, MailboxRef, MessageRef,
+            MessageSearchResult, MessageSummary, MoveMessageRequest, OutgoingMessage,
+            ReplyDraftResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
         },
     };
 
@@ -531,6 +569,7 @@ mod tests {
                 "__test_scope_reference",
                 &serde_json::json!({
                     "account_id": "account-1",
+                    "fallback_account_id": "wrong-account",
                     "path": ["Projects", "Customer"],
                     "id": 42
                 }),
@@ -890,6 +929,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reply_draft_validates_source_recipients_and_state() {
+        let request = CreateReplyDraftRequest {
+            message: MessageRef {
+                account_id: Some("a".to_owned()),
+                mailbox_path: vec!["INBOX".to_owned()],
+                id: 1,
+            },
+            body: "Reply".to_owned(),
+        };
+        for data in [
+            r#"{source:{account_id:"b",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:["sender@example.com"],cc:[],sent:false,draft_present:true,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:0,subject:"Re: S",to:["sender@example.com"],cc:[],sent:false,draft_present:true,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:[],cc:[],sent:false,draft_present:true,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"",to:["sender@example.com"],cc:[],sent:false,draft_present:true,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:[""],cc:[],sent:false,draft_present:true,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:["sender@example.com"],cc:[],sent:true,draft_present:true,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:["sender@example.com"],cc:[],sent:false,draft_present:false,visible:true,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:["sender@example.com"],cc:[],sent:false,draft_present:true,visible:false,content_verified:true}"#,
+            r#"{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:1,subject:"Re: S",to:["sender@example.com"],cc:[],sent:false,draft_present:true,visible:true,content_verified:false}"#,
+        ] {
+            let script =
+                format!("function run() {{ return JSON.stringify({{ok: true, data: {data}}}); }}");
+            assert_matches!(
+                backend(&script).create_reply_draft(request.clone()).await,
+                Err(MailError::AutomationFailed(_))
+            );
+        }
+
+        let script = r#"function run() { return JSON.stringify({ok:true,data:{source:{account_id:"a",mailbox_path:["INBOX"],id:1},local_id:2,subject:"Re: S",to:["sender@example.com"],cc:[],sent:false,draft_present:true,visible:true,content_verified:true}}); }"#;
+        let result: ReplyDraftResult = backend(script).create_reply_draft(request).await.unwrap();
+        assert_eq!(result.local_id, 2);
+    }
+
+    #[tokio::test]
+    async fn embedded_reply_content_places_body_above_quote() {
+        let content: String = JxaBackend::default()
+            .call(
+                "__test_reply_content",
+                &serde_json::json!({
+                    "body": "My reply",
+                    "quoted_content": "> Previous message"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(content, "My reply\n\n> Previous message");
+
+        for (body, quoted, saved, expected) in [
+            (
+                "My reply",
+                "> Previous message",
+                "My reply\r\n\r\n> Previous message",
+                true,
+            ),
+            ("My reply", "> Previous message", "My reply", false),
+            (
+                "My reply",
+                "> Previous message",
+                "> Previous message",
+                false,
+            ),
+            (
+                "My reply",
+                "> Previous message",
+                "> Previous message\n\nMy reply",
+                false,
+            ),
+            ("", "> Previous message", "> Previous message", true),
+            ("", "> Previous message", "", false),
+            ("", "", "", true),
+        ] {
+            let verified: bool = JxaBackend::default()
+                .call(
+                    "__test_reply_content_verified",
+                    &serde_json::json!({
+                        "body": body,
+                        "quoted_content": quoted,
+                        "saved_content": saved
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(verified, expected, "body={body:?} saved={saved:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn state_mismatches_are_rejected_for_each_requested_field() {
         let script = r#"function run() { return JSON.stringify({ok: true, data: {message: {account_id: "a", mailbox_path: ["INBOX"], id: 1}, read: false, flagged: false}}); }"#;
         let message = MessageRef {
@@ -930,6 +1056,7 @@ mod tests {
                     account_id: Some("a".to_owned()),
                     path: vec!["Archive".to_owned()],
                 },
+                confirm: true,
             })
             .await
             .unwrap();
@@ -956,6 +1083,7 @@ mod tests {
                             account_id: Some("a".to_owned()),
                             path: vec!["Archive".to_owned()],
                         },
+                        confirm: true,
                     })
                     .await,
                 Err(MailError::AutomationFailed(_))

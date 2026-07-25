@@ -6,10 +6,10 @@ use crate::{
     MailBackend, MailService,
     error::Result,
     model::{
-        CheckMailRequest, CreateDraftRequest, DEFAULT_BODY_CHARS, DEFAULT_RESULT_LIMIT,
-        DEFAULT_SNAPSHOT_LIMIT, GetMessageRequest, InboxSnapshotRequest, ListMailboxesRequest,
-        MailboxRef, MessageRef, MoveMessageRequest, OutgoingMessage, SearchRequest,
-        SendMessageRequest, SetMessageStateRequest,
+        CheckMailRequest, CreateDraftRequest, CreateReplyDraftRequest, DEFAULT_BODY_CHARS,
+        DEFAULT_RESULT_LIMIT, DEFAULT_SNAPSHOT_LIMIT, GetMessageRequest, InboxSnapshotRequest,
+        ListMailboxesRequest, MailboxRef, MessageRef, MoveMessageRequest, OutgoingMessage,
+        SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -52,12 +52,17 @@ pub enum Command {
     Move(MoveArgs),
     /// Create and display a draft in Mail without sending it.
     Draft(ComposeArgs),
+    /// Create and display an unsent native reply draft.
+    Reply(ReplyArgs),
     /// Send a new message after explicit confirmation.
     Send(SendArgs),
     /// Serve MCP tools over stdin/stdout.
     Mcp {
-        /// Enable the send_message tool; each call must still set confirm=true.
+        /// Enable state changes, moves, drafts, replies, and checking for new mail.
         #[arg(long)]
+        allow_write: bool,
+        /// Permit send calls with --allow-write; each call must also set confirm=true.
+        #[arg(long, requires = "allow_write")]
         allow_send: bool,
     },
 }
@@ -185,6 +190,18 @@ pub struct MoveArgs {
     /// One destination path component. Repeat for nested mailboxes.
     #[arg(long = "destination-mailbox", required = true)]
     pub destination_path: Vec<String>,
+    /// Confirm that this invocation should move the message.
+    #[arg(long)]
+    pub confirm_move: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ReplyArgs {
+    #[command(flatten)]
+    pub message: MessageRefArgs,
+    /// Plain-text reply body inserted above Mail's quoted content.
+    #[arg(long, default_value = "")]
+    pub body: String,
 }
 
 impl MoveArgs {
@@ -311,6 +328,7 @@ where
                     .move_message(MoveMessageRequest {
                         message: args.message.reference(),
                         destination,
+                        confirm: args.confirm_move,
                     })
                     .await?,
             )?
@@ -319,6 +337,14 @@ where
             service
                 .create_draft(CreateDraftRequest {
                     message: args.message(),
+                })
+                .await?,
+        )?,
+        Command::Reply(args) => serde_json::to_value(
+            service
+                .create_reply_draft(CreateReplyDraftRequest {
+                    message: args.message.reference(),
+                    body: args.body,
                 })
                 .await?,
         )?,

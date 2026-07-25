@@ -5,11 +5,12 @@ use crate::{
     error::{MailError, Result},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, InboxSnapshot, InboxSnapshotRequest, ListMailboxesRequest,
-        MAX_BODY_CHARS, MAX_COMPOSE_BODY_CHARS, MAX_RECIPIENTS, MAX_RESULT_LIMIT,
-        MAX_SUBJECT_CHARS, Mailbox, MailboxRef, MessageDetail, MessageRef, MessageSearchResult,
-        MessageStateResult, MoveMessageRequest, MoveMessageResult, OutgoingMessage, SearchRequest,
-        SendMessageRequest, SetMessageStateRequest,
+        CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
+        ListMailboxesRequest, MAX_BODY_CHARS, MAX_COMPOSE_BODY_CHARS, MAX_RECIPIENTS,
+        MAX_RESULT_LIMIT, MAX_SUBJECT_CHARS, Mailbox, MailboxRef, MessageDetail, MessageRef,
+        MessageSearchResult, MessageStateResult, MoveMessageRequest, MoveMessageResult,
+        OutgoingMessage, ReplyDraftResult, SearchRequest, SendMessageRequest,
+        SetMessageStateRequest,
     },
 };
 
@@ -21,6 +22,7 @@ const MAX_CURSOR_BYTES: usize = MAX_SELECTOR_CHARS * 12 + 64;
 #[derive(Clone, Debug)]
 pub struct MailService<B> {
     backend: B,
+    write_enabled: bool,
     send_enabled: bool,
 }
 
@@ -31,8 +33,14 @@ where
     pub fn new(backend: B) -> Self {
         Self {
             backend,
+            write_enabled: false,
             send_enabled: false,
         }
+    }
+
+    pub fn with_write_enabled(mut self, enabled: bool) -> Self {
+        self.write_enabled = enabled;
+        self
     }
 
     pub fn with_send_enabled(mut self, enabled: bool) -> Self {
@@ -96,6 +104,7 @@ where
     }
 
     pub async fn check_mail(&self, request: CheckMailRequest) -> Result<CheckMailResult> {
+        self.require_write_enabled()?;
         validate_optional_selector("account id", request.account_id.as_deref())?;
         self.backend.check_mail(request).await
     }
@@ -104,6 +113,7 @@ where
         &self,
         request: SetMessageStateRequest,
     ) -> Result<MessageStateResult> {
+        self.require_write_enabled()?;
         validate_mutation_message(&request.message)?;
         if request.read.is_none() && request.flagged.is_none() {
             return Err(MailError::Validation(
@@ -114,7 +124,13 @@ where
     }
 
     pub async fn move_message(&self, mut request: MoveMessageRequest) -> Result<MoveMessageResult> {
+        self.require_write_enabled()?;
         validate_mutation_message(&request.message)?;
+        if !request.confirm {
+            return Err(MailError::Validation(
+                "moving a message requires explicit confirmation".to_owned(),
+            ));
+        }
         if request.destination.account_id.is_none() {
             request.destination.account_id = request.message.account_id.clone();
         }
@@ -128,11 +144,23 @@ where
     }
 
     pub async fn create_draft(&self, request: CreateDraftRequest) -> Result<CompositionResult> {
+        self.require_write_enabled()?;
         validate_outgoing(&request.message)?;
         self.backend.create_draft(request).await
     }
 
+    pub async fn create_reply_draft(
+        &self,
+        request: CreateReplyDraftRequest,
+    ) -> Result<ReplyDraftResult> {
+        self.require_write_enabled()?;
+        validate_mutation_message(&request.message)?;
+        validate_reply_body(&request.body)?;
+        self.backend.create_reply_draft(request).await
+    }
+
     pub async fn send_message(&self, request: SendMessageRequest) -> Result<CompositionResult> {
+        self.require_write_enabled()?;
         validate_outgoing(&request.message)?;
         if !self.send_enabled {
             return Err(MailError::Validation(
@@ -145,6 +173,15 @@ where
             ));
         }
         self.backend.send_message(request).await
+    }
+
+    fn require_write_enabled(&self) -> Result<()> {
+        if !self.write_enabled {
+            return Err(MailError::Validation(
+                "mailbox writes are disabled by the current server policy".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -189,6 +226,20 @@ fn validate_outgoing(message: &OutgoingMessage) -> Result<()> {
         )));
     }
     if message.body.contains('\0') {
+        return Err(MailError::Validation(
+            "body cannot contain NUL characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reply_body(body: &str) -> Result<()> {
+    if body.chars().count() > MAX_COMPOSE_BODY_CHARS {
+        return Err(MailError::Validation(format!(
+            "body cannot exceed {MAX_COMPOSE_BODY_CHARS} characters"
+        )));
+    }
+    if body.contains('\0') {
         return Err(MailError::Validation(
             "body cannot contain NUL characters".to_owned(),
         ));
@@ -480,6 +531,24 @@ mod tests {
             })
         }
 
+        async fn create_reply_draft(
+            &self,
+            request: CreateReplyDraftRequest,
+        ) -> Result<ReplyDraftResult> {
+            self.calls.lock().unwrap().push("reply");
+            Ok(ReplyDraftResult {
+                source: request.message,
+                local_id: 9,
+                subject: "Re: Subject".to_owned(),
+                to: vec!["sender@example.com".to_owned()],
+                cc: Vec::new(),
+                sent: false,
+                draft_present: true,
+                visible: true,
+                content_verified: true,
+            })
+        }
+
         async fn send_message(&self, _: SendMessageRequest) -> Result<CompositionResult> {
             self.calls.lock().unwrap().push("send");
             Ok(CompositionResult {
@@ -700,14 +769,9 @@ mod tests {
             })
             .await
             .unwrap();
-        service
-            .check_mail(CheckMailRequest::default())
-            .await
-            .unwrap();
-
         assert_eq!(
             *calls.lock().unwrap(),
-            vec!["accounts", "mailboxes", "inbox", "get", "check"]
+            vec!["accounts", "mailboxes", "inbox", "get"]
         );
     }
 
@@ -733,7 +797,7 @@ mod tests {
     async fn invalid_mutations_fail_before_backend() {
         let backend = FakeBackend::default();
         let calls = backend.calls.clone();
-        let service = MailService::new(backend);
+        let service = MailService::new(backend).with_write_enabled(true);
 
         assert_matches!(
             service
@@ -765,6 +829,7 @@ mod tests {
                         account_id: Some("account-1".to_owned()),
                         path: vec!["INBOX".to_owned()],
                     },
+                    confirm: true,
                 })
                 .await,
             Err(MailError::Validation(_))
@@ -777,9 +842,23 @@ mod tests {
                         account_id: None,
                         path: vec!["INBOX".to_owned()],
                     },
+                    confirm: true,
                 })
                 .await,
             Err(MailError::Validation(message)) if message.contains("differ")
+        );
+        assert_matches!(
+            service
+                .move_message(MoveMessageRequest {
+                    message: message(1),
+                    destination: MailboxRef {
+                        account_id: None,
+                        path: vec!["Archive".to_owned()],
+                    },
+                    confirm: false,
+                })
+                .await,
+            Err(MailError::Validation(message)) if message.contains("confirmation")
         );
 
         let invalid_messages = [
@@ -818,6 +897,75 @@ mod tests {
                 Err(MailError::Validation(_))
             );
         }
+        for body in [
+            "bad\0body".to_owned(),
+            "x".repeat(MAX_COMPOSE_BODY_CHARS + 1),
+        ] {
+            assert_matches!(
+                service
+                    .create_reply_draft(CreateReplyDraftRequest {
+                        message: message(1),
+                        body,
+                    })
+                    .await,
+                Err(MailError::Validation(_))
+            );
+        }
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_policy_denies_every_mutation_before_backend() {
+        let backend = FakeBackend::default();
+        let calls = backend.calls.clone();
+        let service = MailService::new(backend);
+
+        assert!(
+            service
+                .check_mail(CheckMailRequest::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .set_message_state(SetMessageStateRequest {
+                    message: message(1),
+                    read: Some(true),
+                    flagged: None,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .move_message(MoveMessageRequest {
+                    message: message(1),
+                    destination: MailboxRef {
+                        account_id: None,
+                        path: vec!["Archive".to_owned()],
+                    },
+                    confirm: true,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .create_draft(CreateDraftRequest {
+                    message: outgoing(),
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .create_reply_draft(CreateReplyDraftRequest {
+                    message: message(1),
+                    body: "Reply".to_owned(),
+                })
+                .await
+                .is_err()
+        );
         assert!(calls.lock().unwrap().is_empty());
     }
 
@@ -836,7 +984,9 @@ mod tests {
             Err(MailError::Validation(message)) if message.contains("disabled")
         );
 
-        let allowed = MailService::new(backend).with_send_enabled(true);
+        let allowed = MailService::new(backend)
+            .with_write_enabled(true)
+            .with_send_enabled(true);
         assert_matches!(
             allowed
                 .send_message(SendMessageRequest {
@@ -861,7 +1011,7 @@ mod tests {
     async fn valid_mutations_reach_backend() {
         let backend = FakeBackend::default();
         let calls = backend.calls.clone();
-        let service = MailService::new(backend);
+        let service = MailService::new(backend).with_write_enabled(true);
 
         service
             .set_message_state(SetMessageStateRequest {
@@ -878,6 +1028,7 @@ mod tests {
                     account_id: Some("account-1".to_owned()),
                     path: vec!["Archive".to_owned()],
                 },
+                confirm: true,
             })
             .await
             .unwrap();
@@ -887,14 +1038,24 @@ mod tests {
             })
             .await
             .unwrap();
+        service
+            .create_reply_draft(CreateReplyDraftRequest {
+                message: message(1),
+                body: "Reply".to_owned(),
+            })
+            .await
+            .unwrap();
 
-        assert_eq!(*calls.lock().unwrap(), vec!["state", "move", "draft"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["state", "move", "draft", "reply"]
+        );
     }
 
     #[tokio::test]
     async fn move_inherits_and_dispatches_the_source_account() {
         let backend = FakeBackend::default();
-        let service = MailService::new(backend);
+        let service = MailService::new(backend).with_write_enabled(true);
 
         let result = service
             .move_message(MoveMessageRequest {
@@ -903,6 +1064,7 @@ mod tests {
                     account_id: None,
                     path: vec!["Archive".to_owned()],
                 },
+                confirm: true,
             })
             .await
             .unwrap();

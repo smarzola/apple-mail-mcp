@@ -78,7 +78,7 @@ The goal is complete only when:
 ## Milestones
 
 - [x] Milestone 1: Fast, truthful retrieval
-- [ ] Milestone 2: Safe policies and high-value workflows
+- [x] Milestone 2: Safe policies and high-value workflows
 - [ ] Milestone 3: Diagnostics and measurable reliability
 - [ ] Milestone 4: CI, release packaging, and product documentation
 
@@ -146,7 +146,7 @@ cargo test --test cli_write
 cargo test --test mcp_stdio
 ```
 
-Status: Not started.
+Status: Complete on 2026-07-25. MCP and the shared service now default to read-only; checking, state, move, draft, reply draft, and send fail before the backend unless writes are enabled. Sending also needs operator send opt-in and per-call confirmation; moving needs per-call confirmation. Native reply drafts resolve the actual source, save visibly through Mail, read back outgoing-draft membership, subject, recipients, visibility, and full persisted body-plus-quote content, and fail closed on any mismatch. Verification passed: `cargo test service::tests` (10 tests), `cargo test --test cli_write` (6 tests), `cargo test --test mcp_stdio` (1 test), `cargo test automation::tests` (24 tests), `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check`. No live mailbox mutation was performed. The retained reviewer reported the milestone clean after one repair round.
 
 ## Milestone 3: Diagnostics And Measurable Reliability
 

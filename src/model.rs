@@ -215,6 +215,7 @@ pub struct MessageStateResult {
 pub struct MoveMessageRequest {
     pub message: MessageRef,
     pub destination: MailboxRef,
+    pub confirm: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -235,6 +236,25 @@ pub struct OutgoingMessage {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct CreateDraftRequest {
     pub message: OutgoingMessage,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct CreateReplyDraftRequest {
+    pub message: MessageRef,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct ReplyDraftResult {
+    pub source: MessageRef,
+    pub local_id: i64,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub sent: bool,
+    pub draft_present: bool,
+    pub visible: bool,
+    pub content_verified: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

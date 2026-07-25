@@ -5,10 +5,11 @@ use apple_mail_mcp::{
     cli::{Cli, run},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CountSource,
-        CreateDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
-        ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail, MessageSearchResult,
-        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult,
-        SearchCompleteness, SearchRequest, SendMessageRequest, SetMessageStateRequest,
+        CreateDraftRequest, CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot,
+        InboxSnapshotRequest, ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail,
+        MessageSearchResult, MessageStateResult, MessageSummary, MoveMessageRequest,
+        MoveMessageResult, ReplyDraftResult, SearchCompleteness, SearchRequest, SendMessageRequest,
+        SetMessageStateRequest,
     },
 };
 use async_trait::async_trait;
@@ -126,6 +127,13 @@ impl MailBackend for FakeBackend {
         unreachable!("read-only test invoked draft creation")
     }
 
+    async fn create_reply_draft(
+        &self,
+        _: CreateReplyDraftRequest,
+    ) -> apple_mail_mcp::Result<ReplyDraftResult> {
+        unreachable!("read-only test invoked reply draft creation")
+    }
+
     async fn send_message(
         &self,
         _: SendMessageRequest,
@@ -191,7 +199,7 @@ async fn search_preserves_repeated_mailbox_components() {
 async fn mailboxes_show_and_check_emit_json() {
     let backend = FakeBackend::default();
     let gets = backend.gets.clone();
-    let service = MailService::new(backend);
+    let service = MailService::new(backend).with_write_enabled(true);
 
     let mut mailboxes = Vec::new();
     run(

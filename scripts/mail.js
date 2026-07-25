@@ -120,12 +120,10 @@ function mailboxRecords(account, accountId) {
 function scopedMessageReference(message, fallback) {
     let accountId = fallback.account_id || null;
     let path = fallback.path;
-    if (!accountId) {
-        try {
-            const mailbox = message.mailbox();
-            accountId = text(mailbox.account().id(), "") || null;
-        } catch (_) {}
-    }
+    try {
+        const mailbox = message.mailbox();
+        accountId = text(mailbox.account().id(), "") || accountId;
+    } catch (_) {}
     return {
         account_id: accountId,
         mailbox_path: path,
@@ -401,6 +399,36 @@ function composeMessage(Mail, message, visible) {
     return outgoing;
 }
 
+function recipientAddresses(recipients) {
+    const output = [];
+    for (let index = 0; index < recipients.length; index += 1) {
+        output.push(text(recipients[index].address(), ""));
+    }
+    return output.filter(function(address) { return address.length > 0; });
+}
+
+function replyContent(body, quotedContent) {
+    const separator = body.length > 0 && quotedContent.length > 0 ? "\n\n" : "";
+    return body + separator + quotedContent;
+}
+
+function normalizeMailContent(value) {
+    return text(value, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function replyContentVerified(body, quotedContent, savedContent) {
+    return normalizeMailContent(savedContent) ===
+        normalizeMailContent(replyContent(body, quotedContent));
+}
+
+function outgoingMessageById(Mail, id) {
+    const outgoing = Mail.outgoingMessages();
+    for (let index = 0; index < outgoing.length; index += 1) {
+        if (integer(outgoing[index].id(), 0) === id) return outgoing[index];
+    }
+    return null;
+}
+
 function dispatch(operation, args) {
     if (operation === "__health") return {status: "ready"};
     if (operation === "__test_truncate") return truncateText(args.text, args.limit);
@@ -417,7 +445,7 @@ function dispatch(operation, args) {
             },
         };
         return scopedMessageReference(fakeMessage, {
-            account_id: null,
+            account_id: args.fallback_account_id || null,
             path: args.path,
         });
     }
@@ -437,6 +465,12 @@ function dispatch(operation, args) {
             args.reference,
             args.request
         );
+    }
+    if (operation === "__test_reply_content") {
+        return replyContent(args.body, args.quoted_content);
+    }
+    if (operation === "__test_reply_content_verified") {
+        return replyContentVerified(args.body, args.quoted_content, args.saved_content);
     }
 
     const Mail = Application("Mail");
@@ -528,6 +562,37 @@ function dispatch(operation, args) {
             local_id: integer(draft.id(), 0),
             sent: false,
             visible: boolean(draft.visible(), false),
+        };
+    }
+
+    if (operation === "create_reply_draft") {
+        const mailbox = resolveMailbox(Mail, {
+            account_id: args.message.account_id,
+            path: args.message.mailbox_path,
+        });
+        const source = findMessage(mailbox, args.message.id);
+        const reply = Mail.reply(source, {openingWindow: true, replyToAll: false});
+        const quotedContent = text(reply.content(), "");
+        reply.content = replyContent(args.body, quotedContent);
+        Mail.save(reply);
+        const localId = integer(reply.id(), 0);
+        const persisted = outgoingMessageById(Mail, localId);
+        const saved = persisted || reply;
+        const savedContent = text(saved.content(), "");
+        const draftPresent = persisted !== null;
+        return {
+            source: scopedMessageReference(source, {
+                account_id: args.message.account_id,
+                path: args.message.mailbox_path,
+            }),
+            local_id: localId,
+            subject: text(saved.subject(), ""),
+            to: recipientAddresses(saved.toRecipients()),
+            cc: recipientAddresses(saved.ccRecipients()),
+            sent: !draftPresent,
+            draft_present: draftPresent,
+            visible: boolean(saved.visible(), false),
+            content_verified: replyContentVerified(args.body, quotedContent, savedContent),
         };
     }
 
