@@ -27,7 +27,7 @@ impl MailBackend for FakeBackend {
     async fn list_accounts(&self) -> apple_mail_mcp::Result<Vec<Account>> {
         if self.fail {
             return Err(apple_mail_mcp::MailError::AutomationFailed(
-                "classified failure".to_owned(),
+                "ACCOUNT-ID EMAIL@example.test MAILBOX SUBJECT SENDER MESSAGE-ID BODY".to_owned(),
             ));
         }
         Ok(vec![Account {
@@ -153,6 +153,49 @@ async fn accounts_emit_stable_json() {
     let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value[0]["id"], "account-1");
     assert_eq!(value[0]["email_addresses"][0], "person@example.com");
+}
+
+#[tokio::test]
+async fn doctor_emits_only_readiness_metadata() {
+    let service = MailService::new(FakeBackend::default());
+    let cli = Cli::try_parse_from(["apple-mail", "doctor"]).unwrap();
+    let mut output = Vec::new();
+
+    run(cli, &service, &mut output).await.unwrap();
+
+    let text = String::from_utf8(output).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["backend_ready"], true);
+    assert_eq!(value["account_count"], 1);
+    assert!(!text.contains("account-1"));
+    assert!(!text.contains("person@example.com"));
+    assert!(!text.contains("Personal"));
+
+    let failed = MailService::new(FakeBackend {
+        fail: true,
+        ..FakeBackend::default()
+    });
+    let mut output = Vec::new();
+    run(
+        Cli::try_parse_from(["apple-mail", "doctor"]).unwrap(),
+        &failed,
+        &mut output,
+    )
+    .await
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("\"diagnostic\": \"automation_failed\""));
+    for secret in [
+        "ACCOUNT-ID",
+        "EMAIL@example.test",
+        "MAILBOX",
+        "SUBJECT",
+        "SENDER",
+        "MESSAGE-ID",
+        "BODY",
+    ] {
+        assert!(!text.contains(secret));
+    }
 }
 
 #[tokio::test]

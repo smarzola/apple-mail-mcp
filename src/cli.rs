@@ -38,6 +38,8 @@ pub enum Command {
     Search(SearchArgs),
     /// Return exact Inbox counts plus bounded recent and unread summaries.
     Inbox(InboxArgs),
+    /// Diagnose local platform and Mail Automation readiness without exposing account values.
+    Doctor,
     /// Show one message, including a bounded plain-text body.
     Show(MessageArgs),
     /// Ask Mail to check all accounts or one account for new messages.
@@ -294,6 +296,7 @@ where
                 })
                 .await?,
         )?,
+        Command::Doctor => serde_json::to_value(service.doctor().await)?,
         Command::Show(args) => {
             let max_body_chars = args.max_body_chars;
             serde_json::to_value(

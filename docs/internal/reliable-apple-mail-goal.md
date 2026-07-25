@@ -79,7 +79,7 @@ The goal is complete only when:
 
 - [x] Milestone 1: Fast, truthful retrieval
 - [x] Milestone 2: Safe policies and high-value workflows
-- [ ] Milestone 3: Diagnostics and measurable reliability
+- [x] Milestone 3: Diagnostics and measurable reliability
 - [ ] Milestone 4: CI, release packaging, and product documentation
 
 ### Checkpoint Protocol
@@ -172,7 +172,7 @@ sh -n scripts/live-smoke.sh
 sh -n scripts/benchmark-read.sh
 ```
 
-Status: Not started.
+Status: Complete on 2026-07-25. `doctor` now reports only platform, readiness, optional account count, elapsed time, and a fixed diagnostic category; service, CLI, and MCP tests prove arbitrary backend account/message sentinels cannot escape. The gated read benchmark refuses by default, validates readiness first, and emits only counts, end-to-end CLI timings, and completeness. Verification passed: `cargo test doctor`, `cargo test --test cli_read doctor`, `cargo test --test mcp_stdio`, `sh -n scripts/live-smoke.sh`, `sh -n scripts/benchmark-read.sh`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check`. The live read-only benchmark reported one account, a 3,847-message Inbox with 1,113 unread, complete search/snapshot coverage, and no identifiers or message metadata in output. The retained reviewer reported the milestone clean after one repair round.
 
 ## Milestone 4: CI, Release Packaging, And Product Documentation
 

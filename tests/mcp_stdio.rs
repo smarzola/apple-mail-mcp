@@ -20,6 +20,7 @@ use serde_json::json;
 
 #[derive(Default)]
 struct FakeBackend {
+    account_calls: AtomicUsize,
     write_calls: AtomicUsize,
     send_calls: AtomicUsize,
 }
@@ -27,6 +28,11 @@ struct FakeBackend {
 #[async_trait]
 impl MailBackend for FakeBackend {
     async fn list_accounts(&self) -> Result<Vec<Account>> {
+        if self.account_calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(apple_mail_mcp::MailError::AutomationFailed(
+                "ACCOUNT-ID EMAIL@example.test MAILBOX SUBJECT SENDER MESSAGE-ID BODY".to_owned(),
+            ));
+        }
         Ok(vec![Account {
             id: "account-1".to_owned(),
             name: "Local Test".to_owned(),
@@ -105,7 +111,7 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
         .await
         .expect("tools/list should succeed");
 
-    assert_eq!(tools.tools.len(), 11);
+    assert_eq!(tools.tools.len(), 12);
     assert!(tools.tools.iter().all(|tool| tool.output_schema.is_some()));
     let send_tool = tools
         .tools
@@ -137,6 +143,35 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
         !accounts.content.is_empty(),
         "text fallback should be present"
     );
+
+    let doctor = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("doctor"))
+        .await
+        .expect("doctor should succeed");
+    assert_eq!(doctor.is_error, Some(false));
+    let doctor_text = doctor
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .expect("doctor text")
+        .text
+        .as_str();
+    assert!(!doctor_text.contains("account-1"));
+    assert!(!doctor_text.contains("mail@example.test"));
+    assert!(doctor_text.contains("\"backend_ready\":false"));
+    assert!(doctor_text.contains("\"diagnostic\":\"automation_failed\""));
+    for secret in [
+        "ACCOUNT-ID",
+        "EMAIL@example.test",
+        "MAILBOX",
+        "SUBJECT",
+        "SENDER",
+        "MESSAGE-ID",
+        "BODY",
+    ] {
+        assert!(!doctor_text.contains(secret));
+    }
 
     let denied_writes = [
         ("check_mail", json!({})),

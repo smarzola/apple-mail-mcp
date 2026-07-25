@@ -198,6 +198,27 @@ pub struct CheckMailResult {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct DoctorResult {
+    pub platform: String,
+    pub backend_ready: bool,
+    pub account_count: Option<u64>,
+    pub elapsed_ms: u64,
+    pub diagnostic: Option<DoctorDiagnostic>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorDiagnostic {
+    AutomationUnavailable,
+    AutomationFailed,
+    AutomationTimeout,
+    OutputTooLarge,
+    InvalidResponse,
+    StartupFailed,
+    BackendFailed,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct SetMessageStateRequest {
     pub message: MessageRef,
     pub read: Option<bool>,

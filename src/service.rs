@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use chrono::DateTime;
 
 use crate::{
@@ -5,10 +7,10 @@ use crate::{
     error::{MailError, Result},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
-        ListMailboxesRequest, MAX_BODY_CHARS, MAX_COMPOSE_BODY_CHARS, MAX_RECIPIENTS,
-        MAX_RESULT_LIMIT, MAX_SUBJECT_CHARS, Mailbox, MailboxRef, MessageDetail, MessageRef,
-        MessageSearchResult, MessageStateResult, MoveMessageRequest, MoveMessageResult,
+        CreateReplyDraftRequest, DoctorDiagnostic, DoctorResult, GetMessageRequest, InboxSnapshot,
+        InboxSnapshotRequest, ListMailboxesRequest, MAX_BODY_CHARS, MAX_COMPOSE_BODY_CHARS,
+        MAX_RECIPIENTS, MAX_RESULT_LIMIT, MAX_SUBJECT_CHARS, Mailbox, MailboxRef, MessageDetail,
+        MessageRef, MessageSearchResult, MessageStateResult, MoveMessageRequest, MoveMessageResult,
         OutgoingMessage, ReplyDraftResult, SearchRequest, SendMessageRequest,
         SetMessageStateRequest,
     },
@@ -50,6 +52,26 @@ where
 
     pub async fn list_accounts(&self) -> Result<Vec<Account>> {
         self.backend.list_accounts().await
+    }
+
+    pub async fn doctor(&self) -> DoctorResult {
+        let started = Instant::now();
+        match self.backend.list_accounts().await {
+            Ok(accounts) => DoctorResult {
+                platform: std::env::consts::OS.to_owned(),
+                backend_ready: true,
+                account_count: Some(accounts.len() as u64),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                diagnostic: None,
+            },
+            Err(error) => DoctorResult {
+                platform: std::env::consts::OS.to_owned(),
+                backend_ready: false,
+                account_count: None,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                diagnostic: Some(doctor_diagnostic(&error)),
+            },
+        }
     }
 
     pub async fn list_mailboxes(&self, request: ListMailboxesRequest) -> Result<Vec<Mailbox>> {
@@ -182,6 +204,18 @@ where
             ));
         }
         Ok(())
+    }
+}
+
+fn doctor_diagnostic(error: &MailError) -> DoctorDiagnostic {
+    match error {
+        MailError::AutomationUnavailable(_) => DoctorDiagnostic::AutomationUnavailable,
+        MailError::AutomationFailed(_) => DoctorDiagnostic::AutomationFailed,
+        MailError::AutomationTimeout(_) => DoctorDiagnostic::AutomationTimeout,
+        MailError::OutputTooLarge => DoctorDiagnostic::OutputTooLarge,
+        MailError::InvalidResponse(_) | MailError::Json(_) => DoctorDiagnostic::InvalidResponse,
+        MailError::Io(_) => DoctorDiagnostic::StartupFailed,
+        MailError::Validation(_) => DoctorDiagnostic::BackendFailed,
     }
 }
 
@@ -435,13 +469,25 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeBackend {
         calls: Arc<Mutex<Vec<&'static str>>>,
+        fail_accounts: bool,
     }
 
     #[async_trait]
     impl MailBackend for FakeBackend {
         async fn list_accounts(&self) -> Result<Vec<Account>> {
             self.calls.lock().unwrap().push("accounts");
-            Ok(Vec::new())
+            if self.fail_accounts {
+                return Err(MailError::AutomationFailed(
+                    "ACCOUNT-ID EMAIL@example.test MAILBOX SUBJECT SENDER MESSAGE-ID BODY"
+                        .to_owned(),
+                ));
+            }
+            Ok(vec![Account {
+                id: "private-account-id".to_owned(),
+                name: "Private account".to_owned(),
+                email_addresses: vec!["private@example.test".to_owned()],
+                enabled: true,
+            }])
         }
 
         async fn list_mailboxes(&self, _: ListMailboxesRequest) -> Result<Vec<Mailbox>> {
@@ -587,6 +633,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*calls.lock().unwrap(), vec!["search"]);
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_readiness_without_account_values() {
+        let ready = MailService::new(FakeBackend::default()).doctor().await;
+        assert!(ready.backend_ready);
+        assert_eq!(ready.account_count, Some(1));
+        assert_eq!(ready.diagnostic, None);
+        let output = serde_json::to_string(&ready).unwrap();
+        assert!(!output.contains("private-account-id"));
+        assert!(!output.contains("private@example.test"));
+        assert!(!output.contains("Private account"));
+
+        let unavailable = MailService::new(FakeBackend {
+            fail_accounts: true,
+            ..FakeBackend::default()
+        })
+        .doctor()
+        .await;
+        assert!(!unavailable.backend_ready);
+        assert_eq!(unavailable.account_count, None);
+        assert_eq!(
+            unavailable.diagnostic,
+            Some(DoctorDiagnostic::AutomationFailed)
+        );
+        let output = serde_json::to_string(&unavailable).unwrap();
+        for secret in [
+            "ACCOUNT-ID",
+            "EMAIL@example.test",
+            "MAILBOX",
+            "SUBJECT",
+            "SENDER",
+            "MESSAGE-ID",
+            "BODY",
+        ] {
+            assert!(!output.contains(secret));
+        }
     }
 
     #[tokio::test]

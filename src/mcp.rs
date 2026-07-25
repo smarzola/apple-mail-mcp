@@ -10,10 +10,10 @@ use crate::{
     MailBackend, MailService,
     model::{
         AccountList, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        CreateReplyDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
-        ListMailboxesRequest, MailboxList, MessageDetail, MessageSearchResult, MessageStateResult,
-        MoveMessageRequest, MoveMessageResult, ReplyDraftResult, SearchRequest, SendMessageRequest,
-        SetMessageStateRequest,
+        CreateReplyDraftRequest, DoctorResult, GetMessageRequest, InboxSnapshot,
+        InboxSnapshotRequest, ListMailboxesRequest, MailboxList, MessageDetail,
+        MessageSearchResult, MessageStateResult, MoveMessageRequest, MoveMessageResult,
+        ReplyDraftResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -58,6 +58,21 @@ impl McpServer {
             .await
             .map(|accounts| Json(AccountList { accounts }))
             .map_err(|error| error.to_string())
+    }
+
+    /// Diagnose local platform and Mail Automation readiness without returning account values.
+    #[tool(
+        name = "doctor",
+        annotations(
+            title = "Diagnose Apple Mail access",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn doctor(&self) -> Result<Json<DoctorResult>, String> {
+        Ok(Json(self.service.doctor().await))
     }
 
     /// List mailboxes recursively, optionally restricted to one account ID.
