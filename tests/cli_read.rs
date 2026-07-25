@@ -4,10 +4,11 @@ use apple_mail_mcp::{
     MailBackend, MailService,
     cli::{Cli, run},
     model::{
-        Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail,
-        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest,
-        SendMessageRequest, SetMessageStateRequest,
+        Account, CheckMailRequest, CheckMailResult, CompositionResult, CountSource,
+        CreateDraftRequest, GetMessageRequest, InboxSnapshot, InboxSnapshotRequest,
+        ListMailboxesRequest, Mailbox, MailboxRef, MessageDetail, MessageSearchResult,
+        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult,
+        SearchCompleteness, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 use async_trait::async_trait;
@@ -44,15 +45,39 @@ impl MailBackend for FakeBackend {
             reference: MailboxRef::inbox(Some("account-1".to_owned())),
             name: "INBOX".to_owned(),
             unread_count: 2,
+            unread_count_source: CountSource::MailReported,
         }])
     }
 
     async fn search_messages(
         &self,
         request: SearchRequest,
-    ) -> apple_mail_mcp::Result<Vec<MessageSummary>> {
+    ) -> apple_mail_mcp::Result<MessageSearchResult> {
         self.searches.lock().unwrap().push(request);
-        Ok(Vec::new())
+        Ok(MessageSearchResult {
+            messages: Vec::new(),
+            scanned_count: 10,
+            matched_count: 0,
+            has_more: false,
+            next_cursor: None,
+            completeness: SearchCompleteness::Complete,
+        })
+    }
+
+    async fn inbox_snapshot(
+        &self,
+        request: InboxSnapshotRequest,
+    ) -> apple_mail_mcp::Result<InboxSnapshot> {
+        Ok(InboxSnapshot {
+            mailbox: MailboxRef::inbox(request.account_id),
+            total_count: 10,
+            unread_count: 2,
+            unread_count_source: CountSource::ExactBulkProjection,
+            mail_reported_unread_count: 1,
+            recent_messages: Vec::new(),
+            unread_messages: Vec::new(),
+            completeness: SearchCompleteness::Complete,
+        })
     }
 
     async fn get_message(
@@ -138,6 +163,8 @@ async fn search_preserves_repeated_mailbox_components() {
         "Customer",
         "--unread",
         "true",
+        "--received-after",
+        "2026-07-01T00:00:00Z",
         "--limit",
         "7",
     ])
@@ -145,11 +172,18 @@ async fn search_preserves_repeated_mailbox_components() {
     let mut output = Vec::new();
 
     run(cli, &service, &mut output).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["scanned_count"], 10);
+    assert_eq!(value["completeness"], "complete");
 
     let request = searches.lock().unwrap().pop().unwrap();
     assert_eq!(request.mailbox.account_id.as_deref(), Some("account-1"));
     assert_eq!(request.mailbox.path, ["Projects", "Customer"]);
     assert_eq!(request.unread, Some(true));
+    assert_eq!(
+        request.received_after.as_deref(),
+        Some("2026-07-01T00:00:00Z")
+    );
     assert_eq!(request.limit, 7);
 }
 
@@ -169,6 +203,29 @@ async fn mailboxes_show_and_check_emit_json() {
     .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&mailboxes).unwrap();
     assert_eq!(value[0]["reference"]["account_id"], "account-1");
+    assert_eq!(value[0]["unread_count_source"], "mail_reported");
+
+    let mut inbox = Vec::new();
+    run(
+        Cli::try_parse_from([
+            "apple-mail",
+            "inbox",
+            "--account",
+            "account-1",
+            "--recent-limit",
+            "3",
+            "--unread-limit",
+            "4",
+        ])
+        .unwrap(),
+        &service,
+        &mut inbox,
+    )
+    .await
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&inbox).unwrap();
+    assert_eq!(value["unread_count"], 2);
+    assert_eq!(value["mail_reported_unread_count"], 1);
 
     let mut shown = Vec::new();
     run(

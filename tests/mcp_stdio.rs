@@ -8,9 +8,9 @@ use apple_mail_mcp::{
     error::Result,
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MessageDetail, MessageStateResult,
-        MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest, SendMessageRequest,
-        SetMessageStateRequest,
+        GetMessageRequest, InboxSnapshot, InboxSnapshotRequest, ListMailboxesRequest, Mailbox,
+        MessageDetail, MessageSearchResult, MessageStateResult, MoveMessageRequest,
+        MoveMessageResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 use async_trait::async_trait;
@@ -37,7 +37,11 @@ impl MailBackend for FakeBackend {
         unreachable!("not called by this test")
     }
 
-    async fn search_messages(&self, _: SearchRequest) -> Result<Vec<MessageSummary>> {
+    async fn search_messages(&self, _: SearchRequest) -> Result<MessageSearchResult> {
+        unreachable!("not called by this test")
+    }
+
+    async fn inbox_snapshot(&self, _: InboxSnapshotRequest) -> Result<InboxSnapshot> {
         unreachable!("not called by this test")
     }
 
@@ -90,7 +94,7 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
         .await
         .expect("tools/list should succeed");
 
-    assert_eq!(tools.tools.len(), 9);
+    assert_eq!(tools.tools.len(), 10);
     assert!(tools.tools.iter().all(|tool| tool.output_schema.is_some()));
     let send_tool = tools
         .tools

@@ -5,6 +5,7 @@ pub const DEFAULT_RESULT_LIMIT: u16 = 25;
 pub const MAX_RESULT_LIMIT: u16 = 100;
 pub const DEFAULT_BODY_CHARS: u32 = 16_384;
 pub const MAX_BODY_CHARS: u32 = 65_536;
+pub const DEFAULT_SNAPSHOT_LIMIT: u16 = 10;
 pub const MAX_COMPOSE_BODY_CHARS: usize = 200_000;
 pub const MAX_RECIPIENTS: usize = 100;
 pub const MAX_SUBJECT_CHARS: usize = 998;
@@ -42,6 +43,7 @@ pub struct Mailbox {
     pub reference: MailboxRef,
     pub name: String,
     pub unread_count: u64,
+    pub unread_count_source: CountSource,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -83,6 +85,29 @@ pub struct MessageSummaryList {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountSource {
+    MailReported,
+    ExactBulkProjection,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCompleteness {
+    Complete,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct MessageSearchResult {
+    pub messages: Vec<MessageSummary>,
+    pub scanned_count: u64,
+    pub matched_count: u64,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub completeness: SearchCompleteness,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MessageDetail {
     #[serde(flatten)]
     pub summary: MessageSummary,
@@ -102,6 +127,12 @@ pub struct SearchRequest {
     pub flagged: Option<bool>,
     pub sender_contains: Option<String>,
     pub subject_contains: Option<String>,
+    /// Inclusive RFC 3339 lower bound for the received date.
+    pub received_after: Option<String>,
+    /// Exclusive RFC 3339 upper bound for the received date.
+    pub received_before: Option<String>,
+    /// Opaque continuation cursor returned by a previous search.
+    pub cursor: Option<String>,
     pub limit: u16,
 }
 
@@ -113,9 +144,41 @@ impl Default for SearchRequest {
             flagged: None,
             sender_contains: None,
             subject_contains: None,
+            received_after: None,
+            received_before: None,
+            cursor: None,
             limit: DEFAULT_RESULT_LIMIT,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct InboxSnapshotRequest {
+    pub account_id: Option<String>,
+    pub recent_limit: u16,
+    pub unread_limit: u16,
+}
+
+impl Default for InboxSnapshotRequest {
+    fn default() -> Self {
+        Self {
+            account_id: None,
+            recent_limit: DEFAULT_SNAPSHOT_LIMIT,
+            unread_limit: DEFAULT_SNAPSHOT_LIMIT,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+pub struct InboxSnapshot {
+    pub mailbox: MailboxRef,
+    pub total_count: u64,
+    pub unread_count: u64,
+    pub unread_count_source: CountSource,
+    pub mail_reported_unread_count: u64,
+    pub recent_messages: Vec<MessageSummary>,
+    pub unread_messages: Vec<MessageSummary>,
+    pub completeness: SearchCompleteness,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

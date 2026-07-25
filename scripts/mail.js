@@ -105,6 +105,7 @@ function mailboxRecords(account, accountId) {
                 reference: {account_id: accountId, path: path},
                 name: name,
                 unread_count: Math.max(0, integer(mailbox.unreadCount(), 0)),
+                unread_count_source: "mail_reported",
             });
             try {
                 visit(mailbox.mailboxes(), path);
@@ -153,6 +154,228 @@ function messageRecord(message, reference, includeContent, maxBodyChars) {
     return record;
 }
 
+function recordsFromColumns(columns, reference) {
+    const names = [
+        "ids",
+        "message_ids",
+        "subjects",
+        "senders",
+        "dates",
+        "reads",
+        "flags",
+        "sizes",
+    ];
+    const length = columns.ids.length;
+    for (const name of names) {
+        if (!Array.isArray(columns[name]) || columns[name].length !== length) {
+            throw new Error("Mail returned misaligned message columns");
+        }
+    }
+
+    const records = [];
+    for (let index = 0; index < length; index += 1) {
+        records.push({
+            reference: {
+                account_id: reference.account_id || null,
+                mailbox_path: reference.path,
+                id: integer(columns.ids[index], 0),
+            },
+            message_id: text(columns.message_ids[index], "") || null,
+            subject: text(columns.subjects[index], ""),
+            sender: text(columns.senders[index], ""),
+            date_received: date(columns.dates[index]),
+            read: boolean(columns.reads[index], false),
+            flagged: boolean(columns.flags[index], false),
+            size: Math.max(0, integer(columns.sizes[index], 0)),
+        });
+    }
+    return records;
+}
+
+function bulkMessageColumns(mailbox) {
+    const messages = mailbox.messages;
+    return {
+        ids: messages.id(),
+        message_ids: messages.messageId(),
+        subjects: messages.subject(),
+        senders: messages.sender(),
+        dates: messages.dateReceived(),
+        reads: messages.readStatus(),
+        flags: messages.flaggedStatus(),
+        sizes: messages.messageSize(),
+    };
+}
+
+function bulkMessageRecords(mailbox, reference) {
+    return recordsFromColumns(bulkMessageColumns(mailbox), reference);
+}
+
+function recordsFromAccountColumns(groups, path) {
+    let output = [];
+    for (const group of groups) {
+        output = output.concat(recordsFromColumns(group.columns, {
+            account_id: group.account_id,
+            path: path,
+        }));
+    }
+    return output;
+}
+
+function isAggregateInbox(reference) {
+    return !reference.account_id &&
+        reference.path.length === 1 &&
+        reference.path[0].toUpperCase() === "INBOX";
+}
+
+function bulkRecordsForReference(Mail, reference) {
+    if (!isAggregateInbox(reference)) {
+        return bulkMessageRecords(resolveMailbox(Mail, reference), reference);
+    }
+    const groups = [];
+    const accounts = Mail.accounts();
+    for (let index = 0; index < accounts.length; index += 1) {
+        const account = accounts[index];
+        const accountReference = {
+            account_id: text(account.id(), ""),
+            path: ["INBOX"],
+        };
+        const mailbox = resolveMailbox(Mail, accountReference);
+        groups.push({
+            account_id: accountReference.account_id,
+            columns: bulkMessageColumns(mailbox),
+        });
+    }
+    return recordsFromAccountColumns(groups, ["INBOX"]);
+}
+
+function reportedUnreadCountForReference(Mail, reference) {
+    if (!isAggregateInbox(reference)) {
+        return Math.max(0, integer(resolveMailbox(Mail, reference).unreadCount(), 0));
+    }
+    let count = 0;
+    const accounts = Mail.accounts();
+    for (let index = 0; index < accounts.length; index += 1) {
+        const accountReference = {
+            account_id: text(accounts[index].id(), ""),
+            path: ["INBOX"],
+        };
+        count += Math.max(0, integer(resolveMailbox(Mail, accountReference).unreadCount(), 0));
+    }
+    return count;
+}
+
+function receivedMillis(record) {
+    if (!record.date_received) return null;
+    const value = Date.parse(record.date_received);
+    return Number.isFinite(value) ? value : null;
+}
+
+function compareAccountIds(left, right) {
+    if (left === right) return 0;
+    return left < right ? -1 : 1;
+}
+
+function compareNewestFirst(left, right) {
+    const leftMillis = receivedMillis(left);
+    const rightMillis = receivedMillis(right);
+    if (leftMillis === null && rightMillis !== null) return 1;
+    if (leftMillis !== null && rightMillis === null) return -1;
+    if (leftMillis !== rightMillis) return rightMillis - leftMillis;
+    if (left.reference.id !== right.reference.id) return right.reference.id - left.reference.id;
+    const leftAccount = left.reference.account_id || "";
+    const rightAccount = right.reference.account_id || "";
+    return compareAccountIds(leftAccount, rightAccount);
+}
+
+function parseCursor(value) {
+    if (!value) return null;
+    const parts = value.split(":");
+    if (parts.length !== 4 || parts[0] !== "v1") throw new Error("Search cursor was not valid");
+    const millis = parts[1] === "none" ? null : Number(parts[1]);
+    const id = Number(parts[2]);
+    const accountId = decodeURIComponent(parts[3]);
+    if ((millis !== null && !Number.isSafeInteger(millis)) ||
+        !Number.isSafeInteger(id) ||
+        id <= 0 ||
+        !accountId) {
+        throw new Error("Search cursor was not valid");
+    }
+    return {millis: millis, id: id, account_id: accountId};
+}
+
+function cursorFor(record) {
+    const millis = receivedMillis(record);
+    const accountId = record.reference.account_id || "";
+    return "v1:" +
+        (millis === null ? "none" : String(millis)) +
+        ":" +
+        String(record.reference.id) +
+        ":" +
+        encodeURIComponent(accountId);
+}
+
+function followsCursor(record, cursor) {
+    if (!cursor) return true;
+    const millis = receivedMillis(record);
+    if (cursor.millis === null) {
+        if (millis !== null) return false;
+        if (record.reference.id !== cursor.id) return record.reference.id < cursor.id;
+        return compareAccountIds(record.reference.account_id || "", cursor.account_id) > 0;
+    }
+    if (millis === null) return true;
+    if (millis !== cursor.millis) return millis < cursor.millis;
+    if (record.reference.id !== cursor.id) return record.reference.id < cursor.id;
+    return compareAccountIds(record.reference.account_id || "", cursor.account_id) > 0;
+}
+
+function searchResult(records, args) {
+    const senderNeedle = args.sender_contains ? args.sender_contains.toLowerCase() : null;
+    const subjectNeedle = args.subject_contains ? args.subject_contains.toLowerCase() : null;
+    const afterMillis = args.received_after ? Date.parse(args.received_after) : null;
+    const beforeMillis = args.received_before ? Date.parse(args.received_before) : null;
+    const cursor = parseCursor(args.cursor);
+    const matches = records.filter(function(record) {
+        if (args.unread !== null && args.unread !== undefined && (!record.read) !== args.unread) {
+            return false;
+        }
+        if (args.flagged !== null && args.flagged !== undefined && record.flagged !== args.flagged) {
+            return false;
+        }
+        if (senderNeedle && !record.sender.toLowerCase().includes(senderNeedle)) return false;
+        if (subjectNeedle && !record.subject.toLowerCase().includes(subjectNeedle)) return false;
+        const millis = receivedMillis(record);
+        if (afterMillis !== null && (millis === null || millis < afterMillis)) return false;
+        if (beforeMillis !== null && (millis === null || millis >= beforeMillis)) return false;
+        return true;
+    }).sort(compareNewestFirst);
+    const remaining = matches.filter(function(record) { return followsCursor(record, cursor); });
+    const messages = remaining.slice(0, args.limit);
+    const hasMore = remaining.length > messages.length;
+    return {
+        messages: messages,
+        scanned_count: records.length,
+        matched_count: matches.length,
+        has_more: hasMore,
+        next_cursor: hasMore && messages.length > 0 ? cursorFor(messages[messages.length - 1]) : null,
+        completeness: "complete",
+    };
+}
+
+function inboxSnapshot(records, reportedUnreadCount, reference, args) {
+    const newest = records.slice().sort(compareNewestFirst);
+    const unread = newest.filter(function(record) { return !record.read; });
+    return {
+        mailbox: reference,
+        total_count: records.length,
+        unread_count: unread.length,
+        unread_count_source: "exact_bulk_projection",
+        mail_reported_unread_count: reportedUnreadCount,
+        recent_messages: newest.slice(0, args.recent_limit),
+        unread_messages: unread.slice(0, args.unread_limit),
+        completeness: "complete",
+    };
+}
+
 function findMessage(mailbox, id) {
     const candidate = mailbox.messages.byId(id);
     if (integer(candidate.id(), 0) !== id) throw new Error("Message was not found in the mailbox");
@@ -198,6 +421,23 @@ function dispatch(operation, args) {
             path: args.path,
         });
     }
+    if (operation === "__test_records_from_columns") {
+        return recordsFromColumns(args.columns, args.reference);
+    }
+    if (operation === "__test_records_from_account_columns") {
+        return recordsFromAccountColumns(args.groups, args.path);
+    }
+    if (operation === "__test_search_records") {
+        return searchResult(args.records, args.request);
+    }
+    if (operation === "__test_inbox_snapshot_records") {
+        return inboxSnapshot(
+            args.records,
+            args.reported_unread_count,
+            args.reference,
+            args.request
+        );
+    }
 
     const Mail = Application("Mail");
 
@@ -216,25 +456,17 @@ function dispatch(operation, args) {
     }
 
     if (operation === "search_messages") {
-        const mailbox = resolveMailbox(Mail, args.mailbox);
-        const output = [];
-        const scanLimit = Math.min(mailbox.messages.length, 1000);
-        const senderNeedle = args.sender_contains ? args.sender_contains.toLowerCase() : null;
-        const subjectNeedle = args.subject_contains ? args.subject_contains.toLowerCase() : null;
+        return searchResult(bulkRecordsForReference(Mail, args.mailbox), args);
+    }
 
-        for (let index = 0; index < scanLimit && output.length < args.limit; index += 1) {
-            const message = mailbox.messages.at(index);
-            const read = boolean(message.readStatus(), false);
-            const flagged = boolean(message.flaggedStatus(), false);
-            const sender = text(message.sender(), "");
-            const subject = text(message.subject(), "");
-            if (args.unread !== null && args.unread !== undefined && (!read) !== args.unread) continue;
-            if (args.flagged !== null && args.flagged !== undefined && flagged !== args.flagged) continue;
-            if (senderNeedle && !sender.toLowerCase().includes(senderNeedle)) continue;
-            if (subjectNeedle && !subject.toLowerCase().includes(subjectNeedle)) continue;
-            output.push(messageRecord(message, args.mailbox, false, 0));
-        }
-        return output;
+    if (operation === "inbox_snapshot") {
+        const reference = {account_id: args.account_id || null, path: ["INBOX"]};
+        return inboxSnapshot(
+            bulkRecordsForReference(Mail, reference),
+            reportedUnreadCountForReference(Mail, reference),
+            reference,
+            args
+        );
     }
 
     if (operation === "get_message") {

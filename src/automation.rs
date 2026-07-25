@@ -13,9 +13,9 @@ use crate::{
     error::{MailError, Result},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MessageDetail, MessageRef,
-        MessageStateResult, MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest,
-        SendMessageRequest, SetMessageStateRequest,
+        GetMessageRequest, InboxSnapshot, InboxSnapshotRequest, ListMailboxesRequest, Mailbox,
+        MessageDetail, MessageRef, MessageSearchResult, MessageStateResult, MoveMessageRequest,
+        MoveMessageResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -28,7 +28,8 @@ const MAX_AUTOMATION_INPUT: usize = 524_288;
 pub trait MailBackend: Send + Sync {
     async fn list_accounts(&self) -> Result<Vec<Account>>;
     async fn list_mailboxes(&self, request: ListMailboxesRequest) -> Result<Vec<Mailbox>>;
-    async fn search_messages(&self, request: SearchRequest) -> Result<Vec<MessageSummary>>;
+    async fn search_messages(&self, request: SearchRequest) -> Result<MessageSearchResult>;
+    async fn inbox_snapshot(&self, request: InboxSnapshotRequest) -> Result<InboxSnapshot>;
     async fn get_message(&self, request: GetMessageRequest) -> Result<MessageDetail>;
     async fn check_mail(&self, request: CheckMailRequest) -> Result<CheckMailResult>;
     async fn set_message_state(
@@ -53,8 +54,12 @@ where
         (**self).list_mailboxes(request).await
     }
 
-    async fn search_messages(&self, request: SearchRequest) -> Result<Vec<MessageSummary>> {
+    async fn search_messages(&self, request: SearchRequest) -> Result<MessageSearchResult> {
         (**self).search_messages(request).await
+    }
+
+    async fn inbox_snapshot(&self, request: InboxSnapshotRequest) -> Result<InboxSnapshot> {
+        (**self).inbox_snapshot(request).await
     }
 
     async fn get_message(&self, request: GetMessageRequest) -> Result<MessageDetail> {
@@ -283,8 +288,12 @@ impl MailBackend for JxaBackend {
         self.call("list_mailboxes", &request).await
     }
 
-    async fn search_messages(&self, request: SearchRequest) -> Result<Vec<MessageSummary>> {
+    async fn search_messages(&self, request: SearchRequest) -> Result<MessageSearchResult> {
         self.call("search_messages", &request).await
+    }
+
+    async fn inbox_snapshot(&self, request: InboxSnapshotRequest) -> Result<InboxSnapshot> {
+        self.call("inbox_snapshot", &request).await
     }
 
     async fn get_message(&self, request: GetMessageRequest) -> Result<MessageDetail> {
@@ -360,8 +369,9 @@ mod tests {
     use crate::{
         MailBackend,
         model::{
-            CreateDraftRequest, MailboxRef, MessageRef, MoveMessageRequest, OutgoingMessage,
-            SendMessageRequest, SetMessageStateRequest,
+            CreateDraftRequest, InboxSnapshot, MailboxRef, MessageRef, MessageSearchResult,
+            MessageSummary, MoveMessageRequest, OutgoingMessage, SearchRequest, SendMessageRequest,
+            SetMessageStateRequest,
         },
     };
 
@@ -531,6 +541,314 @@ mod tests {
         assert_eq!(reference.account_id.as_deref(), Some("account-1"));
         assert_eq!(reference.mailbox_path, ["Projects", "Customer"]);
         assert_eq!(reference.id, 42);
+    }
+
+    fn summary(id: i64, date: Option<&str>, subject: &str, read: bool) -> MessageSummary {
+        summary_for("account-1", id, date, subject, read)
+    }
+
+    fn summary_for(
+        account_id: &str,
+        id: i64,
+        date: Option<&str>,
+        subject: &str,
+        read: bool,
+    ) -> MessageSummary {
+        MessageSummary {
+            reference: MessageRef {
+                account_id: Some(account_id.to_owned()),
+                mailbox_path: vec!["INBOX".to_owned()],
+                id,
+            },
+            message_id: Some(format!("message-{id}@example.test")),
+            subject: subject.to_owned(),
+            sender: "Sender <sender@example.test>".to_owned(),
+            date_received: date.map(str::to_owned),
+            read,
+            flagged: id == 3,
+            size: id as u64 * 10,
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_bulk_columns_require_alignment_and_preserve_rows() {
+        let reference = serde_json::json!({
+            "account_id": "account-1",
+            "path": ["INBOX"]
+        });
+        let columns = serde_json::json!({
+            "ids": [2, 1],
+            "message_ids": ["two@example.test", "one@example.test"],
+            "subjects": ["Two", "One"],
+            "senders": ["two@example.test", "one@example.test"],
+            "dates": ["2026-07-25T08:00:00.000Z", "2026-07-25T07:00:00.000Z"],
+            "reads": [false, true],
+            "flags": [true, false],
+            "sizes": [20, 10]
+        });
+        let rows: Vec<MessageSummary> = JxaBackend::default()
+            .call(
+                "__test_records_from_columns",
+                &serde_json::json!({"columns": columns, "reference": reference}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].reference.id, 2);
+        assert_eq!(rows[1].subject, "One");
+
+        let groups = serde_json::json!([
+            {"account_id": "account-a", "columns": {
+                "ids": [42],
+                "message_ids": ["a@example.test"],
+                "subjects": ["A"],
+                "senders": ["a@example.test"],
+                "dates": ["2026-07-25T08:00:00.000Z"],
+                "reads": [false],
+                "flags": [false],
+                "sizes": [10]
+            }},
+            {"account_id": "account-b", "columns": {
+                "ids": [42],
+                "message_ids": ["b@example.test"],
+                "subjects": ["B"],
+                "senders": ["b@example.test"],
+                "dates": ["2026-07-25T08:00:00.000Z"],
+                "reads": [false],
+                "flags": [false],
+                "sizes": [10]
+            }}
+        ]);
+        let aggregate: Vec<MessageSummary> = JxaBackend::default()
+            .call(
+                "__test_records_from_account_columns",
+                &serde_json::json!({"groups": groups, "path": ["INBOX"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            aggregate
+                .iter()
+                .map(|row| row.reference.account_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["account-a", "account-b"]
+        );
+
+        let misaligned = serde_json::json!({
+            "ids": [1],
+            "message_ids": [],
+            "subjects": ["One"],
+            "senders": ["one@example.test"],
+            "dates": ["2026-07-25T07:00:00.000Z"],
+            "reads": [true],
+            "flags": [false],
+            "sizes": [10]
+        });
+        assert_matches!(
+            JxaBackend::default()
+                .call::<Vec<MessageSummary>, _>(
+                    "__test_records_from_columns",
+                    &serde_json::json!({"columns": misaligned, "reference": reference}),
+                )
+                .await,
+            Err(MailError::AutomationFailed(_))
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_search_filters_sorts_and_continues_deterministically() {
+        let records = vec![
+            summary(1, Some("2026-07-24T08:00:00.000Z"), "Match old", false),
+            summary(2, Some("2026-07-25T08:00:00.000Z"), "Match tie", false),
+            summary(3, Some("2026-07-25T08:00:00.000Z"), "Match tie", false),
+            summary(4, None, "No date", false),
+            summary(5, Some("2026-07-25T09:00:00.000Z"), "Other", true),
+        ];
+        let request = SearchRequest {
+            subject_contains: Some("match".to_owned()),
+            unread: Some(true),
+            received_after: Some("2026-07-24T00:00:00Z".to_owned()),
+            received_before: Some("2026-07-26T00:00:00Z".to_owned()),
+            limit: 2,
+            ..SearchRequest::default()
+        };
+        let first: MessageSearchResult = JxaBackend::default()
+            .call(
+                "__test_search_records",
+                &serde_json::json!({"records": &records, "request": request}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.scanned_count, 5);
+        assert_eq!(first.matched_count, 3);
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| message.reference.id)
+                .collect::<Vec<_>>(),
+            [3, 2]
+        );
+        assert!(first.has_more);
+        let cursor = first.next_cursor.clone().unwrap();
+
+        let second_request = SearchRequest {
+            subject_contains: Some("match".to_owned()),
+            unread: Some(true),
+            received_after: Some("2026-07-24T00:00:00Z".to_owned()),
+            received_before: Some("2026-07-26T00:00:00Z".to_owned()),
+            cursor: Some(cursor),
+            limit: 2,
+            ..SearchRequest::default()
+        };
+        let second: MessageSearchResult = JxaBackend::default()
+            .call(
+                "__test_search_records",
+                &serde_json::json!({"records": &records, "request": second_request}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.matched_count, 3);
+        assert_eq!(second.messages[0].reference.id, 1);
+        assert!(!second.has_more);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn embedded_search_cursor_is_lossless_across_accounts() {
+        for accounts in [["account-b", "account-a"], ["é", "e\u{301}"]] {
+            for received in [Some("2026-07-25T08:00:00.000Z"), None] {
+                let records = vec![
+                    summary_for(accounts[0], 42, received, "Same key", false),
+                    summary_for(accounts[1], 42, received, "Same key", false),
+                ];
+                let first: MessageSearchResult = JxaBackend::default()
+                    .call(
+                        "__test_search_records",
+                        &serde_json::json!({
+                            "records": &records,
+                            "request": SearchRequest { limit: 1, ..SearchRequest::default() }
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                let second: MessageSearchResult = JxaBackend::default()
+                    .call(
+                        "__test_search_records",
+                        &serde_json::json!({
+                            "records": &records,
+                            "request": SearchRequest {
+                                limit: 1,
+                                cursor: first.next_cursor,
+                                ..SearchRequest::default()
+                            }
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                let mut returned = vec![
+                    first.messages[0]
+                        .reference
+                        .account_id
+                        .as_deref()
+                        .unwrap()
+                        .to_owned(),
+                    second.messages[0]
+                        .reference
+                        .account_id
+                        .as_deref()
+                        .unwrap()
+                        .to_owned(),
+                ];
+                returned.sort();
+                let mut expected = accounts.map(str::to_owned).to_vec();
+                expected.sort();
+                assert_eq!(returned, expected);
+                assert!(!second.has_more);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_search_has_no_legacy_thousand_row_ceiling() {
+        let mut records = (1..=1_001)
+            .map(|id| summary(id, Some("2026-07-25T08:00:00.000Z"), "Ordinary", false))
+            .collect::<Vec<_>>();
+        records.push(summary(
+            1_002,
+            Some("2026-07-25T09:00:00.000Z"),
+            "Needle beyond old ceiling",
+            false,
+        ));
+        let result: MessageSearchResult = JxaBackend::default()
+            .call(
+                "__test_search_records",
+                &serde_json::json!({
+                    "records": records,
+                    "request": SearchRequest {
+                        subject_contains: Some("needle".to_owned()),
+                        limit: 1,
+                        ..SearchRequest::default()
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.scanned_count, 1_002);
+        assert_eq!(result.matched_count, 1);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].reference.id, 1_002);
+        assert!(!result.has_more);
+    }
+
+    #[tokio::test]
+    async fn embedded_search_date_bounds_are_after_inclusive_before_exclusive() {
+        let records = vec![
+            summary(1, Some("2026-07-24T00:00:00.000Z"), "At after", false),
+            summary(2, Some("2026-07-25T00:00:00.000Z"), "At before", false),
+        ];
+        let result: MessageSearchResult = JxaBackend::default()
+            .call(
+                "__test_search_records",
+                &serde_json::json!({
+                    "records": records,
+                    "request": SearchRequest {
+                        received_after: Some("2026-07-24T00:00:00Z".to_owned()),
+                        received_before: Some("2026-07-25T00:00:00Z".to_owned()),
+                        ..SearchRequest::default()
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.matched_count, 1);
+        assert_eq!(result.messages[0].reference.id, 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_snapshot_distinguishes_reported_and_exact_counts() {
+        let records = vec![
+            summary(1, Some("2026-07-24T08:00:00.000Z"), "Old", false),
+            summary(2, Some("2026-07-25T08:00:00.000Z"), "New", true),
+            summary(3, Some("2026-07-25T09:00:00.000Z"), "Newest", false),
+        ];
+        let snapshot: InboxSnapshot = JxaBackend::default()
+            .call(
+                "__test_inbox_snapshot_records",
+                &serde_json::json!({
+                    "records": records,
+                    "reference": {"account_id": "account-1", "path": ["INBOX"]},
+                    "reported_unread_count": 1,
+                    "request": {"recent_limit": 2, "unread_limit": 1}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.total_count, 3);
+        assert_eq!(snapshot.unread_count, 2);
+        assert_eq!(snapshot.mail_reported_unread_count, 1);
+        assert_eq!(snapshot.recent_messages[0].reference.id, 3);
+        assert_eq!(snapshot.unread_messages.len(), 1);
     }
 
     #[tokio::test]

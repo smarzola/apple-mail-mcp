@@ -10,9 +10,9 @@ use crate::{
     MailBackend, MailService,
     model::{
         AccountList, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, MailboxList, MessageDetail, MessageStateResult,
-        MessageSummaryList, MoveMessageRequest, MoveMessageResult, SearchRequest,
-        SendMessageRequest, SetMessageStateRequest,
+        GetMessageRequest, InboxSnapshot, InboxSnapshotRequest, ListMailboxesRequest, MailboxList,
+        MessageDetail, MessageSearchResult, MessageStateResult, MoveMessageRequest,
+        MoveMessageResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -79,7 +79,7 @@ impl McpServer {
             .map_err(|error| error.to_string())
     }
 
-    /// Search one mailbox with bounded filters and result count.
+    /// Search one mailbox completely, returning bounded newest-first results and continuation metadata.
     #[tool(
         name = "search_messages",
         annotations(
@@ -93,11 +93,33 @@ impl McpServer {
     async fn search_messages(
         &self,
         Parameters(request): Parameters<SearchRequest>,
-    ) -> Result<Json<MessageSummaryList>, String> {
+    ) -> Result<Json<MessageSearchResult>, String> {
         self.service
             .search_messages(request)
             .await
-            .map(|messages| Json(MessageSummaryList { messages }))
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return exact Inbox counts plus bounded recent and unread summaries without bodies.
+    #[tool(
+        name = "get_inbox_snapshot",
+        annotations(
+            title = "Get Inbox snapshot",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn get_inbox_snapshot(
+        &self,
+        Parameters(request): Parameters<InboxSnapshotRequest>,
+    ) -> Result<Json<InboxSnapshot>, String> {
+        self.service
+            .inbox_snapshot(request)
+            .await
+            .map(Json)
             .map_err(|error| error.to_string())
     }
 

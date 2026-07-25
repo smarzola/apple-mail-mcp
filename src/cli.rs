@@ -7,8 +7,9 @@ use crate::{
     error::Result,
     model::{
         CheckMailRequest, CreateDraftRequest, DEFAULT_BODY_CHARS, DEFAULT_RESULT_LIMIT,
-        GetMessageRequest, ListMailboxesRequest, MailboxRef, MessageRef, MoveMessageRequest,
-        OutgoingMessage, SearchRequest, SendMessageRequest, SetMessageStateRequest,
+        DEFAULT_SNAPSHOT_LIMIT, GetMessageRequest, InboxSnapshotRequest, ListMailboxesRequest,
+        MailboxRef, MessageRef, MoveMessageRequest, OutgoingMessage, SearchRequest,
+        SendMessageRequest, SetMessageStateRequest,
     },
 };
 
@@ -35,6 +36,8 @@ pub enum Command {
     },
     /// Search a mailbox and return bounded message metadata.
     Search(SearchArgs),
+    /// Return exact Inbox counts plus bounded recent and unread summaries.
+    Inbox(InboxArgs),
     /// Show one message, including a bounded plain-text body.
     Show(MessageArgs),
     /// Ask Mail to check all accounts or one account for new messages.
@@ -98,9 +101,31 @@ pub struct SearchArgs {
     /// Case-insensitive substring match against the subject.
     #[arg(long)]
     pub subject: Option<String>,
+    /// Inclusive RFC 3339 lower bound for received messages.
+    #[arg(long)]
+    pub received_after: Option<String>,
+    /// Exclusive RFC 3339 upper bound for received messages.
+    #[arg(long)]
+    pub received_before: Option<String>,
+    /// Opaque continuation cursor returned by a previous search.
+    #[arg(long)]
+    pub cursor: Option<String>,
     /// Maximum messages returned (1-100).
     #[arg(long, default_value_t = DEFAULT_RESULT_LIMIT)]
     pub limit: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct InboxArgs {
+    /// Mail account ID. Omit it to use Mail's aggregate INBOX.
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Maximum recent message summaries returned (1-100).
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_LIMIT)]
+    pub recent_limit: u16,
+    /// Maximum unread message summaries returned (1-100).
+    #[arg(long, default_value_t = DEFAULT_SNAPSHOT_LIMIT)]
+    pub unread_limit: u16,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -236,7 +261,19 @@ where
                     flagged: args.flagged,
                     sender_contains: args.sender,
                     subject_contains: args.subject,
+                    received_after: args.received_after,
+                    received_before: args.received_before,
+                    cursor: args.cursor,
                     limit: args.limit,
+                })
+                .await?,
+        )?,
+        Command::Inbox(args) => serde_json::to_value(
+            service
+                .inbox_snapshot(InboxSnapshotRequest {
+                    account_id: args.account,
+                    recent_limit: args.recent_limit,
+                    unread_limit: args.unread_limit,
                 })
                 .await?,
         )?,

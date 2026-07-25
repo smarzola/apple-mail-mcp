@@ -77,7 +77,7 @@ The goal is complete only when:
 
 ## Milestones
 
-- [ ] Milestone 1: Fast, truthful retrieval
+- [x] Milestone 1: Fast, truthful retrieval
 - [ ] Milestone 2: Safe policies and high-value workflows
 - [ ] Milestone 3: Diagnostics and measurable reliability
 - [ ] Milestone 4: CI, release packaging, and product documentation
@@ -120,7 +120,7 @@ cargo test --test cli_read
 cargo test --test mcp_stdio
 ```
 
-Status: Not started.
+Status: Complete on 2026-07-25. Search now bulk-projects complete message metadata, returns explicit completeness/count/cursor fields, applies inclusive-after/exclusive-before filters, and paginates with a globally scoped deterministic key. Aggregate Inbox reads preserve each source account. Mailbox counters are labeled `mail_reported`; Inbox snapshot returns exact bulk-projected counts and bounded lists. Verification passed: `cargo test automation::tests` (22 tests), `cargo test service::tests` (9 tests), `cargo test --test cli_read` (4 tests), `cargo test --test mcp_stdio` (1 test), `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `git diff --check`. Read-only live aggregate search and snapshot scanned 3,847 messages, reported 1,113 exact unread versus Mail's reported 1, and returned account-scoped references. The retained reviewer reported the milestone clean after three repair rounds.
 
 ## Milestone 2: Safe Policies And High-Value Workflows
 

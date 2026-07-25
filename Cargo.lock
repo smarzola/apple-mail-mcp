@@ -67,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "assert_matches",
  "async-trait",
+ "chrono",
  "clap",
  "rmcp",
  "schemars",

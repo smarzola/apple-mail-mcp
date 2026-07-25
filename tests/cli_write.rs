@@ -5,9 +5,9 @@ use apple_mail_mcp::{
     cli::{Cli, run},
     model::{
         Account, CheckMailRequest, CheckMailResult, CompositionResult, CreateDraftRequest,
-        GetMessageRequest, ListMailboxesRequest, Mailbox, MessageDetail, MessageStateResult,
-        MessageSummary, MoveMessageRequest, MoveMessageResult, SearchRequest, SendMessageRequest,
-        SetMessageStateRequest,
+        GetMessageRequest, InboxSnapshot, InboxSnapshotRequest, ListMailboxesRequest, Mailbox,
+        MessageDetail, MessageSearchResult, MessageStateResult, MoveMessageRequest,
+        MoveMessageResult, SearchRequest, SendMessageRequest, SetMessageStateRequest,
     },
 };
 use async_trait::async_trait;
@@ -34,8 +34,15 @@ impl MailBackend for FakeBackend {
     async fn search_messages(
         &self,
         _: SearchRequest,
-    ) -> apple_mail_mcp::Result<Vec<MessageSummary>> {
+    ) -> apple_mail_mcp::Result<MessageSearchResult> {
         unreachable!("write test invoked search")
+    }
+
+    async fn inbox_snapshot(
+        &self,
+        _: InboxSnapshotRequest,
+    ) -> apple_mail_mcp::Result<InboxSnapshot> {
+        unreachable!("write test invoked inbox snapshot")
     }
 
     async fn get_message(&self, _: GetMessageRequest) -> apple_mail_mcp::Result<MessageDetail> {
