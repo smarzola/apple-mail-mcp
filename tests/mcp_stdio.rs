@@ -105,6 +105,13 @@ async fn initializes_lists_calls_and_closes_over_stdio_framing() {
     });
 
     let client = ().serve(client_stdio).await.expect("client should initialize");
+    let server_info = client
+        .peer()
+        .peer_info()
+        .expect("server handshake should include implementation metadata");
+    assert_eq!(server_info.server_info.name, "apple-mail");
+    assert_eq!(server_info.server_info.version, env!("CARGO_PKG_VERSION"));
+
     let tools = client
         .peer()
         .list_tools(None)

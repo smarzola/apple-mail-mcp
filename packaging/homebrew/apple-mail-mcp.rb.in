@@ -1,0 +1,19 @@
+class AppleMailMcp < Formula
+  desc "Local CLI and stdio MCP server for Apple Mail"
+  homepage "https://github.com/smarzola/apple-mail-mcp"
+  url "https://github.com/smarzola/apple-mail-mcp/releases/download/v@VERSION@/apple-mail-mcp-@VERSION@-macos-universal.tar.gz"
+  sha256 "@SHA256@"
+  license "MIT"
+  version "@VERSION@"
+
+  depends_on macos: :ventura
+
+  def install
+    bin.install "apple-mail"
+    pkgshare.install "mcp-server.json", "MCP-CONFIG.md"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/apple-mail --version")
+  end
+end

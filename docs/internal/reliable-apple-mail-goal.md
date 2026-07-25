@@ -80,7 +80,7 @@ The goal is complete only when:
 - [x] Milestone 1: Fast, truthful retrieval
 - [x] Milestone 2: Safe policies and high-value workflows
 - [x] Milestone 3: Diagnostics and measurable reliability
-- [ ] Milestone 4: CI, release packaging, and product documentation
+- [x] Milestone 4: CI, release packaging, and product documentation
 
 ### Checkpoint Protocol
 
@@ -198,7 +198,7 @@ sh -n scripts/package-release.sh
 ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each { |path| YAML.load_file(path) }'
 ```
 
-Status: Not started.
+Status: Complete on 2026-07-25. Version 0.2.0 now has macOS CI for formatting, strict Clippy, tests, and a locked release build. The tag workflow installs both Apple Rust targets, constructs and verifies a universal binary, optionally signs and notarizes only with complete secret groups, and publishes an explicit archive/checksum/formula asset set. Packaging verifies both architectures and its own SHA-256 output, includes read-only MCP metadata, and renders a tap-ready formula without claiming that a release or tap already exists. README and architecture docs now cover interfaces, policy gates, diagnostics, benchmark semantics, install states, distribution artifacts, and Automation limitations. Verification passed: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` (49 tests), `cargo build --release --locked`, all three shell syntax checks, Ruby YAML parsing for both workflows, `git diff --check`, version/metadata consistency tests, thin-binary rejection, and a package/checksum/archive/formula dry run with a locally assembled arm64+x86_64 Mach-O fixture. This host lacks `rustup` and an x86_64 Rust standard library, so the real cross-build remains enforced by the workflow that installs both targets; the native 0.2.0 release binary was built locally. The retained reviewer reported the milestone clean after two repair rounds.
 
 ## Final Verification
 
