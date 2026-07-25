@@ -20,12 +20,40 @@ credentials.
 You need:
 
 - macOS with Mail configured for at least one account.
-- Rust 1.88 or later to install from source.
 - Permission for your terminal or MCP client to control Mail.
+- Rust 1.88 or later only if you build from source.
 
-The project currently supports installation from source. Published tags can
-also provide a universal macOS archive and checksum on
-[GitHub Releases](https://github.com/smarzola/apple-mail-mcp/releases).
+## Install a release
+
+Release archives contain one `apple-mail` executable for both Apple silicon
+and Intel Macs. Find the current version on
+[GitHub Releases](https://github.com/smarzola/apple-mail-mcp/releases), then
+download and verify it. For example, to install version 0.2.0:
+
+```bash
+APPLE_MAIL_VERSION=0.2.0
+APPLE_MAIL_ARCHIVE="apple-mail-mcp-${APPLE_MAIL_VERSION}-macos-universal.tar.gz"
+APPLE_MAIL_RELEASE=https://github.com/smarzola/apple-mail-mcp/releases/download
+curl -fLO "${APPLE_MAIL_RELEASE}/v${APPLE_MAIL_VERSION}/${APPLE_MAIL_ARCHIVE}"
+curl -fLO "${APPLE_MAIL_RELEASE}/v${APPLE_MAIL_VERSION}/${APPLE_MAIL_ARCHIVE}.sha256"
+shasum -a 256 -c "${APPLE_MAIL_ARCHIVE}.sha256"
+tar -xzf "${APPLE_MAIL_ARCHIVE}"
+mkdir -p "$HOME/.local/bin"
+cp "apple-mail-mcp-${APPLE_MAIL_VERSION}-macos-universal/apple-mail" "$HOME/.local/bin/apple-mail"
+```
+
+Verify the installation:
+
+```bash
+"$HOME/.local/bin/apple-mail" --version
+```
+
+Add `$HOME/.local/bin` to your `PATH` if `command -v apple-mail` doesn't print
+the installed path.
+
+Release binaries are checksum-verified but aren't currently signed with an
+Apple Developer ID or notarized. If macOS blocks a browser-downloaded binary,
+install from source instead of bypassing Gatekeeper.
 
 ## Install from source
 
